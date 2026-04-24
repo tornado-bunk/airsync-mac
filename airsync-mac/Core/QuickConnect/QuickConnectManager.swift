@@ -224,19 +224,38 @@ class QuickConnectManager: ObservableObject {
         request.httpBody = message.data(using: .utf8)
         request.timeoutInterval = 5.0
         
+        var success = false
+        
         do {
             let (_, response) = try await URLSession.shared.data(for: request)
             
             if let httpResponse = response as? HTTPURLResponse {
                 if httpResponse.statusCode == 200 {
                     print("[quick-connect] Wake-up request successful - device should reconnect soon")
+                    success = true
+                } else if httpResponse.statusCode == 502 {
+                    print("[quick-connect] Wake-up request failed with 502 (Bad Gateway). Retrying once...")
+                    
+                    // Small delay before retry
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                    
+                    if let (_, secondResponse) = try? await URLSession.shared.data(for: request),
+                       let secondHttpResponse = secondResponse as? HTTPURLResponse,
+                       secondHttpResponse.statusCode == 200 {
+                        print("[quick-connect] Wake-up retry successful")
+                        success = true
+                    } else {
+                        print("[quick-connect] Wake-up retry failed")
+                    }
                 } else {
                     print("[quick-connect] Wake-up request failed with status: \(httpResponse.statusCode)")
                 }
             }
         } catch {
             print("[quick-connect] Failed to send wake-up request: \(error)")
-            
+        }
+        
+        if !success {
             // Fallback: Try UDP broadcast
             await sendUDPWakeUpRequest(to: device, message: message)
         }

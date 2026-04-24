@@ -25,6 +25,12 @@ struct SentryInitializer {
             options.sendDefaultPii = true
             
             options.beforeSend = { event in
+                // Ignore transient wake-up failures (often 502/timeout while device is waking up)
+                if let request = event.request, let url = request.url, url.contains("/wakeup") {
+                    print("[SentryInitializer] Filtering out transient wake-up error for: \(url)")
+                    return nil
+                }
+                
                 if let exceptions = event.exceptions,
                    let firstException = exceptions.first,
                    firstException.type == "App Hanging" {
