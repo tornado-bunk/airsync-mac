@@ -74,22 +74,8 @@ struct DeviceCard: View {
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
                     .glassBoxIfAvailable(radius: 20)
-                    .tint(isLastConnected && device.isActive ? Color.accentColor.opacity(0.5) : Color.clear)
                     .opacity(device.isActive ? 1.0 : 0.7)
                     .grayscale(device.isActive ? 0 : 0.4)
-                    .background(
-                        GeometryReader { geometry in
-                            if let nsImage = wallpaperImage {
-                                Image(nsImage: nsImage)
-                                    .resizable()
-                                    .scaledToFill()
-                                    .blur(radius: device.isActive ? 0 : 3)
-                                    .frame(width: geometry.size.width, height: geometry.size.height)
-                                    .clipped()
-                            }
-                        }
-                            .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-                    )
                 }
                 .buttonStyle(.plain)
             } else {

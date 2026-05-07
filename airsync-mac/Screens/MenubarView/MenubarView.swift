@@ -71,11 +71,8 @@ struct MenubarView: View {
         .padding(.bottom, 24)
         .frame(width: minWidthTabs + 48)
         .environment(\.controlActiveState, .active)
-        .onAppear {
-            appState.isMenubarWindowOpen = true
-        }
-        .onDisappear {
-            appState.isMenubarWindowOpen = false
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) { _ in
+            // Optional: close if it loses focus
         }
     }
 }

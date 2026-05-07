@@ -36,11 +36,11 @@ struct TopSegmentView: View {
                 }
                 .menuStyle(.borderlessButton)
                 .focusable(false)
-                
+
+                Spacer()
+
                 ConnectionStatusPill()
                     .focusable(false)
-                
-                Spacer()
                 
                 GlassButtonView(
                     label: "Open App",
@@ -51,9 +51,9 @@ struct TopSegmentView: View {
                     openAndFocusMainWindow()
                 }
             }
-            
-            HStack(spacing: 4) {
-                if appState.device != nil {
+
+            if appState.device != nil {
+                HStack(spacing: 4) {
                     GlassButtonView(
                         label: "Send Clipboard",
                         systemImage: "clipboard",
@@ -73,40 +73,38 @@ struct TopSegmentView: View {
                             openQuickShare()
                         }
                     )
-                }
-                
-                if appState.adbConnected {
-                    GlassButtonView(
-                        label: "Mirror",
-                        systemImage: "apps.iphone",
-                        iconOnly: true,
-                        circleSize: toolButtonSize,
-                        action: {
-                            ADBConnector.startScrcpy(
-                                ip: appState.device?.ipAddress ?? "",
-                                port: appState.adbPort,
-                                deviceName: appState.device?.name ?? "My Phone"
-                            )
-                        }
-                    )
-                    .contextMenu {
-                        Button("Android Mirror") {
-                            appState.isNativeMirroring = true
-                        }
-                        
-                        Button("Desktop Mode") {
-                            ADBConnector.startScrcpy(
-                                ip: appState.device?.ipAddress ?? "",
-                                port: appState.adbPort,
-                                deviceName: appState.device?.name ?? "My Phone",
-                                desktop: true
-                            )
+                    
+                    if appState.adbConnected {
+                        GlassButtonView(
+                            label: "Mirror",
+                            systemImage: "apps.iphone",
+                            iconOnly: true,
+                            circleSize: toolButtonSize,
+                            action: {
+                                ADBConnector.startScrcpy(
+                                    ip: appState.device?.ipAddress ?? "",
+                                    port: appState.adbPort,
+                                    deviceName: appState.device?.name ?? "My Phone"
+                                )
+                            }
+                        )
+                        .contextMenu {
+                            Button("Android Mirror") {
+                                appState.isNativeMirroring = true
+                            }
+                            
+                            Button("Desktop Mode") {
+                                ADBConnector.startScrcpy(
+                                    ip: appState.device?.ipAddress ?? "",
+                                    port: appState.adbPort,
+                                    deviceName: appState.device?.name ?? "My Phone",
+                                    desktop: true
+                                )
+                            }
                         }
                     }
-                }
-
-
-                if appState.device != nil {
+                    
+                    
                     GlassButtonView(
                         label: "DND",
                         systemImage: appState.silenceAllNotifications ? "bell.slash.fill" : "bell.badge",
@@ -116,10 +114,10 @@ struct TopSegmentView: View {
                         appState.silenceAllNotifications.toggle()
                     }
                 }
-            }
-            
-            if appState.adbConnected && !appState.recentApps.isEmpty {
-                RecentAppsGridView()
+                
+                if appState.adbConnected && !appState.recentApps.isEmpty {
+                    RecentAppsGridView()
+                }
             }
         }
         .padding(12)
@@ -192,9 +190,10 @@ struct MediaSegmentView: View {
 
 struct DiscoverySegmentView: View {
     @ObservedObject var appState = AppState.shared
-    
+    @StateObject private var udpDiscovery = UDPDiscoveryManager.shared
+
     var body: some View {
-        if appState.device == nil {
+        if appState.device == nil && !udpDiscovery.discoveredDevices.isEmpty {
             MenubarDeviceDiscoveryView()
                 .padding(10)
                 .segmentStyle()

@@ -8,12 +8,13 @@
 import SwiftUI
 
 struct MenubarDeviceDiscoveryView: View {
-    @StateObject private var udpDiscovery = UDPDiscoveryManager.shared
-    @StateObject private var quickConnectManager = QuickConnectManager.shared
+    @ObservedObject private var udpDiscovery = UDPDiscoveryManager.shared
+    @ObservedObject private var quickConnectManager = QuickConnectManager.shared
     
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if !udpDiscovery.discoveredDevices.isEmpty {
+            let devices = udpDiscovery.discoveredDevices
+            if !devices.isEmpty {
                 Text("Nearby Devices")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundColor(.secondary)
@@ -21,8 +22,8 @@ struct MenubarDeviceDiscoveryView: View {
                 
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
-                        ForEach(udpDiscovery.discoveredDevices) { device in
-                            let lastConnected = quickConnectManager.getLastConnectedDevice()
+                        let lastConnected = quickConnectManager.getLastConnectedDevice()
+                        ForEach(devices) { device in
                             DeviceCard(
                                 device: device,
                                 isLastConnected: lastConnected?.name == device.name && (lastConnected != nil && device.ips.contains(lastConnected!.ipAddress)),
@@ -30,7 +31,7 @@ struct MenubarDeviceDiscoveryView: View {
                                 connectAction: {
                                     quickConnectManager.connect(to: device)
                                 },
-                                namespace: nil // No namespace for menubar popover
+                                namespace: nil
                             )
                         }
                     }

@@ -12,8 +12,8 @@ import CryptoKit
 
 struct ScannerView: View {
     @ObservedObject var appState = AppState.shared
-    @StateObject private var quickConnectManager = QuickConnectManager.shared
-    @StateObject private var udpDiscovery = UDPDiscoveryManager.shared
+    @ObservedObject private var quickConnectManager = QuickConnectManager.shared
+    @ObservedObject private var udpDiscovery = UDPDiscoveryManager.shared
     @State private var qrImage: CGImage?
     @State private var showQR = true
     @State private var copyStatus: String?
