@@ -160,7 +160,7 @@ class MenuBarManager: NSObject {
             // Update content size
             if let hostingView = panel.contentView {
                 let size = hostingView.fittingSize
-                panel.setContentSize(NSSize(width: 320, height: size.height))
+                panel.setContentSize(size)
             }
             
             // Position panel
@@ -172,7 +172,9 @@ class MenuBarManager: NSObject {
             
             panel.setFrameOrigin(NSPoint(x: x, y: y))
             
-            panel.orderFrontRegardless()
+            DispatchQueue.main.async {
+                panel.makeKeyAndOrderFront(nil)
+            }
 
             appState.isMenubarWindowOpen = true
             

@@ -44,7 +44,7 @@ struct MenubarView: View {
         appState.device?.name ?? "Ready"
     }
 
-    private let minWidthTabs: CGFloat = 320
+    private let minWidthTabs: CGFloat = 360
     private let toolButtonSize: CGFloat = 42
 
     var body: some View {
@@ -66,16 +66,16 @@ struct MenubarView: View {
             
             DiscoverySegmentView()
             
-            RecentAppsSegmentView()
-            
 //            StatusSegmentView()
             
             MediaSegmentView()
             
             NotificationsSegmentView()
         }
-        .frame(width: minWidthTabs)
-        .padding(.bottom, 12)
+        .padding(.horizontal, 24)
+        .padding(.bottom, 24)
+        .frame(width: minWidthTabs + 48)
+        .environment(\.controlActiveState, .active)
         .onAppear {
             appState.isMenubarWindowOpen = true
         }

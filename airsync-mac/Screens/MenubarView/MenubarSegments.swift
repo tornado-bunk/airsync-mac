@@ -114,9 +114,13 @@ struct TopSegmentView: View {
                     appState.silenceAllNotifications.toggle()
                 }
             }
+            
+            if appState.adbConnected && !appState.recentApps.isEmpty {
+                RecentAppsGridView()
+            }
         }
         .padding(12)
-        .applyGlassViewIfAvailable()
+        .segmentStyle()
     }
     
     private func sendClipboard() {
@@ -161,26 +165,15 @@ struct MediaSegmentView: View {
     @ObservedObject var appState = AppState.shared
     
     var body: some View {
-            if appState.status != nil {
-                DeviceStatusView(showMediaToggle: true)
-                    .transition(.scale.combined(with: .opacity))
-                    .animation(.interpolatingSpring(stiffness: 200, damping: 30), value: appState.isMusicCardHidden)
-            }
-
-    }
-}
-
-struct RecentAppsSegmentView: View {
-    @ObservedObject var appState = AppState.shared
-    
-    var body: some View {
-        if appState.adbConnected && !appState.recentApps.isEmpty {
-            RecentAppsGridView()
-                .padding(10)
-                .applyGlassViewIfAvailable()
+        if appState.status != nil {
+            DeviceStatusView(showMediaToggle: true)
+                .transition(.scale.combined(with: .opacity))
+                .animation(.interpolatingSpring(stiffness: 200, damping: 30), value: appState.isMusicCardHidden)
         }
     }
 }
+
+
 
 struct DiscoverySegmentView: View {
     @ObservedObject var appState = AppState.shared
@@ -189,7 +182,7 @@ struct DiscoverySegmentView: View {
         if appState.device == nil {
             MenubarDeviceDiscoveryView()
                 .padding(10)
-                .applyGlassViewIfAvailable()
+                .segmentStyle()
         }
     }
 }
@@ -199,25 +192,17 @@ struct NotificationsSegmentView: View {
     
     var body: some View {
         if appState.device != nil && !appState.notifications.isEmpty {
-            VStack(spacing: 8) {
+            VStack(spacing: 6) {
                 HStack {
                     Text("Notifications")
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundColor(.secondary)
-                    Spacer()
-                    Button("Clear All") {
-                        appState.clearNotifications()
-                    }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 11))
-                    .foregroundColor(.accentColor)
                 }
-                .padding(.horizontal, 4)
-                
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+
                 MenuBarNotificationsListView()
             }
-            .padding(10)
-            .applyGlassViewIfAvailable()
         }
     }
 }
