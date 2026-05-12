@@ -74,7 +74,7 @@ struct GlassButtonView: View {
     }
 }
 
-private extension View {
+extension View {
     @ViewBuilder
     func ifLet<T, Content: View>(_ value: T?, transform: (Self, T) -> Content) -> some View {
         if let value = value {

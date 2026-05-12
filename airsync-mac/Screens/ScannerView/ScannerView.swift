@@ -12,8 +12,8 @@ import CryptoKit
 
 struct ScannerView: View {
     @ObservedObject var appState = AppState.shared
-    @StateObject private var quickConnectManager = QuickConnectManager.shared
-    @StateObject private var udpDiscovery = UDPDiscoveryManager.shared
+    @ObservedObject private var quickConnectManager = QuickConnectManager.shared
+    @ObservedObject private var udpDiscovery = UDPDiscoveryManager.shared
     @State private var qrImage: CGImage?
     @State private var showQR = true
     @State private var copyStatus: String?
@@ -132,6 +132,9 @@ struct ScannerView: View {
                         }
                     }
                     .transition(.move(edge: .top).combined(with: .opacity))
+                    .onTapGesture {
+                        generateQRAsync()
+                    }
                 } else {
                      Spacer()
                 }
@@ -191,8 +194,8 @@ struct ScannerView: View {
                         .scrollClipDisabled()
                         .animation(.spring(response: 0.5, dampingFraction: 0.8), value: udpDiscovery.discoveredDevices)
                         .frame(maxWidth: .infinity)
-                        .frame(height: showQR ? 100 : nil)
-                        .frame(maxHeight: showQR ? 100 : 400)
+                        .frame(height: showQR ? 80 : 260)
+                        .frame(maxHeight: 400)
                     }
                     .padding(.top, 8)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -206,9 +209,7 @@ struct ScannerView: View {
         .onDisappear {
             // UDP Discovery is now managed globally in App/AppDelegate
         }
-        .onTapGesture {
-            generateQRAsync()
-        }
+
         .onChange(of: appState.shouldRefreshQR) { _, newValue in
             if newValue {
                 generateQRAsync()

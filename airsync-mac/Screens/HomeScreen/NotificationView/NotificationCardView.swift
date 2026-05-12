@@ -13,13 +13,15 @@ struct NotificationCardView: View {
     let deleteNotification: () -> Void
     let hideNotification: () -> Void
 
+    @State private var isHovering = false
+
     var body: some View {
-        ZStack {
+        ZStack(alignment: .topTrailing) {
             HStack(alignment: .top) {
                 appIconView()
                     .aspectRatio(contentMode: .fit)
-                    .frame(width: 25, height: 25)
-                    .padding(5)
+                    .frame(width: 30, height: 30)
+                    .padding(2)
 
                 VStack(alignment: .leading) {
                     Text(notification.app + " - " + notification.title)
@@ -52,7 +54,39 @@ struct NotificationCardView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
             .frame(maxWidth: .infinity, alignment: .leading)
+
+            // Hover Actions Pill
+            if isHovering {
+                HStack(spacing: 4) {
+                    Button {
+                        hideNotification()
+                    } label: {
+                        Image(systemName: "eye.slash")
+                            .font(.system(size: 14, weight: .bold))
+                            .frame(width: 28, height: 28)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Hide")
+                    .glassBoxIfAvailable(radius: 24)
+
+                    Button {
+                        deleteNotification()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 14, weight: .bold))
+                            .frame(width: 28, height: 28)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Dismiss")
+                    .glassBoxIfAvailable(radius: 32)
+
+                }
+                .padding(6)
+                .transition(.move(edge: .top).combined(with: .opacity))
+            }
         }
+        .contentShape(Rectangle())
+        .onHover { isHovering = $0 }
         .swipeActions(edge: .leading) {
             Button(role: .cancel) {
                 hideNotification()

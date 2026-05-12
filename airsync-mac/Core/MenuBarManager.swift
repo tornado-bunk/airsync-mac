@@ -13,7 +13,7 @@ class MenuBarManager: NSObject {
     static let shared = MenuBarManager()
     
     private var statusItem: NSStatusItem?
-    private var popover: NSPopover?
+    private var menubarPanel: MenubarPanel?
     private var eventMonitor: Any?
     private var cancellables = Set<AnyCancellable>()
     private var appState = AppState.shared
@@ -54,11 +54,7 @@ class MenuBarManager: NSObject {
     }
     
     private func setupPopover() {
-        let popover = NSPopover()
-        popover.contentSize = NSSize(width: 320, height: 480)
-        popover.behavior = .transient
-        popover.contentViewController = NSHostingController(rootView: MenubarView().environmentObject(appState))
-        self.popover = popover
+        // Initialized on first show to ensure proper sizing
     }
     
     private func setupBindings() {
@@ -143,7 +139,7 @@ class MenuBarManager: NSObject {
     }
     
     func togglePopover() {
-        if popover?.isShown == true {
+        if menubarPanel?.isVisible == true {
             hidePopover()
         } else {
             showPopover()
@@ -151,34 +147,50 @@ class MenuBarManager: NSObject {
     }
     
     func showPopover() {
-        guard let button = statusItem?.button, let popover = popover else { return }
-        if !popover.isShown {
-            NSApp.activate(ignoringOtherApps: true)
-            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-
-            if let popoverWindow = popover.contentViewController?.view.window {
-                popoverWindow.makeKeyAndOrderFront(nil)
-                popoverWindow.orderFrontRegardless()
+        guard let button = statusItem?.button else { return }
+        
+        if menubarPanel == nil {
+            let contentView = MenubarView().environmentObject(appState)
+            menubarPanel = MenubarPanel(contentRect: NSRect(x: 0, y: 0, width: 320, height: 1), rootView: contentView)
+        }
+        
+        guard let panel = menubarPanel else { return }
+        
+        if !panel.isVisible {
+            // Update content size
+            if let hostingView = panel.contentView {
+                let size = hostingView.fittingSize
+                panel.setContentSize(size)
             }
-
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak popover] in
-                guard let popoverWindow = popover?.contentViewController?.view.window else { return }
-                NSApp.activate(ignoringOtherApps: true)
-                popoverWindow.makeKeyAndOrderFront(nil)
-                popoverWindow.orderFrontRegardless()
+            
+            // Position panel
+            let buttonFrame = button.window?.frame ?? .zero
+            let panelFrame = panel.frame
+            
+            let x = buttonFrame.origin.x + (buttonFrame.width / 2) - (panelFrame.width / 2)
+            let y = buttonFrame.origin.y - panelFrame.height - 5
+            
+            panel.setFrameOrigin(NSPoint(x: x, y: y))
+            
+            DispatchQueue.main.async {
+                panel.makeKeyAndOrderFront(nil)
             }
 
             appState.isMenubarWindowOpen = true
             
             // Monitor clicks outside to close
             eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
-                self?.hidePopover()
+                if let eventLocation = NSEvent.mouseLocation as NSPoint?,
+                   let panelFrame = self?.menubarPanel?.frame,
+                   !NSMouseInRect(eventLocation, panelFrame, false) {
+                    self?.hidePopover()
+                }
             }
         }
     }
     
     func hidePopover() {
-        popover?.performClose(nil)
+        menubarPanel?.orderOut(nil)
         appState.isMenubarWindowOpen = false
         if let monitor = eventMonitor {
             NSEvent.removeMonitor(monitor)

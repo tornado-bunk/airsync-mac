@@ -5,7 +5,7 @@ struct DeviceCard: View {
     let isLastConnected: Bool
     let isCompact: Bool
     let connectAction: () -> Void
-    let namespace: Namespace.ID
+    let namespace: Namespace.ID?
 
     @State private var wallpaperImage: NSImage?
     @ObservedObject private var quickConnectManager = QuickConnectManager.shared
@@ -20,21 +20,28 @@ struct DeviceCard: View {
                 // Compact Mode
                 Button(action: connectAction) {
                     HStack(spacing: 8) {
-                        if isLoading {
-                            ProgressView()
-                                .controlSize(.small)
-                                .frame(width: 16, height: 16)
-                        } else {
+                        ZStack {
+                            if isLoading {
+                                ProgressView()
+                                    .controlSize(.small)
+                                    .frame(width: 16, height: 16)
+                            }
+                            
                             Image(systemName: "iphone")
                                 .font(.system(size: 16))
-                                .matchedGeometryEffect(id: "icon-\(device.id)", in: namespace)
+                                .ifLet(namespace) { view, ns in
+                                    view.matchedGeometryEffect(id: "icon-\(device.id)", in: ns)
+                                }
+                                .opacity(isLoading ? 0 : 1)
                         }
                         
                         VStack(alignment: .leading, spacing: 0) {
                             Text(device.name)
                                 .font(.system(size: 12, weight: .semibold))
                                 .lineLimit(1)
-                                .matchedGeometryEffect(id: "name-\(device.id)", in: namespace)
+                                .ifLet(namespace) { view, ns in
+                                    view.matchedGeometryEffect(id: "name-\(device.id)", in: ns)
+                                }
                         }
                         
                         if !device.isActive {
@@ -59,28 +66,16 @@ struct DeviceCard: View {
                             Image(systemName: "clock.arrow.circlepath")
                                 .font(.caption2)
                                 .foregroundColor(.accentColor)
-                                .matchedGeometryEffect(id: "status-\(device.id)", in: namespace)
+                                .ifLet(namespace) { view, ns in
+                                    view.matchedGeometryEffect(id: "status-\(device.id)", in: ns)
+                                }
                         }
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
                     .glassBoxIfAvailable(radius: 20)
-                    .tint(isLastConnected && device.isActive ? Color.accentColor.opacity(0.5) : Color.clear)
                     .opacity(device.isActive ? 1.0 : 0.7)
                     .grayscale(device.isActive ? 0 : 0.4)
-                    .background(
-                        GeometryReader { geometry in
-                            if let nsImage = wallpaperImage {
-                                Image(nsImage: nsImage)
-                                    .resizable()
-                                    .scaledToFill()
-                                    .blur(radius: device.isActive ? 0 : 3)
-                                    .frame(width: geometry.size.width, height: geometry.size.height)
-                                    .clipped()
-                            }
-                        }
-                            .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-                    )
                 }
                 .buttonStyle(.plain)
             } else {
@@ -90,13 +85,17 @@ struct DeviceCard: View {
                         .font(.system(size: 50))
                         .foregroundColor(.secondary)
                         .padding(.top, 16)
-                        .matchedGeometryEffect(id: "icon-\(device.id)", in: namespace)
+                        .ifLet(namespace) { view, ns in
+                            view.matchedGeometryEffect(id: "icon-\(device.id)", in: ns)
+                        }
                     
                     VStack(spacing: 4) {
                         Text(device.name)
                             .font(.system(size: 18, weight: .bold))
                             .multilineTextAlignment(.center)
-                            .matchedGeometryEffect(id: "name-\(device.id)", in: namespace)
+                            .ifLet(namespace) { view, ns in
+                                view.matchedGeometryEffect(id: "name-\(device.id)", in: ns)
+                            }
                         
                         HStack(spacing: 8) {
                             if device.ips.contains(where: { !$0.hasPrefix("100.") }) {
@@ -129,7 +128,9 @@ struct DeviceCard: View {
                         .padding(.horizontal, 8)
                         .padding(.vertical, 2)
                         .background(Color.accentColor.opacity(0.2), in: .capsule)
-                        .matchedGeometryEffect(id: "status-\(device.id)", in: namespace)
+                        .ifLet(namespace) { view, ns in
+                            view.matchedGeometryEffect(id: "status-\(device.id)", in: ns)
+                        }
                     }
                     
                     Spacer()

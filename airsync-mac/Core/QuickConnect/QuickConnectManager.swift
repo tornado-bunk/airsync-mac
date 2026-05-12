@@ -143,9 +143,28 @@ class QuickConnectManager: ObservableObject {
     
     private func sendWakeUpRequest(to device: Device) async {
         // Get current connection info to send in wake-up request
-        guard let currentIP = getBestLocalIP(for: device.ipAddress),
-              let currentPort = getCurrentMacPort() else {
-            print("[quick-connect] Cannot wake up device - no current connection info available")
+        var currentIP = getBestLocalIP(for: device.ipAddress)
+        var currentPort = getCurrentMacPort()
+        
+        if currentIP == nil || currentPort == nil {
+            print("[quick-connect] Network info not ready, waiting for WebSocket server...")
+            for i in 1...10 {
+                try? await Task.sleep(nanoseconds: 200_000_000) // 200ms
+                currentIP = getBestLocalIP(for: device.ipAddress)
+                currentPort = getCurrentMacPort()
+                
+                if currentIP != nil && currentPort != nil {
+                    print("[quick-connect] Network info obtained after \(i * 200)ms")
+                    break
+                }
+            }
+        }
+        
+        guard let finalIP = currentIP, let finalPort = currentPort else {
+            print("[quick-connect] Cannot wake up device - no current connection info available after waiting")
+            DispatchQueue.main.async {
+                self.connectingDeviceID = nil
+            }
             return
         }
         
@@ -156,8 +175,8 @@ class QuickConnectManager: ObservableObject {
         {
             "type": "wakeUpRequest",
             "data": {
-                "macIP": "\(currentIP)",
-                "macPort": \(currentPort),
+                "macIP": "\(finalIP)",
+                "macPort": \(finalPort),
                 "macName": "\(macName)",
                 "isPlus": \(AppState.shared.isPlus)
             }

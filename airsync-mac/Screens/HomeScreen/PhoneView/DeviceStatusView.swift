@@ -14,6 +14,7 @@ struct DeviceStatusView: View {
     @State private var isDragging = false
     @State private var showingPlusPopover = false
     var showMediaToggle: Bool = true
+    var useGlass: Bool = true
 
     var body: some View {
 
