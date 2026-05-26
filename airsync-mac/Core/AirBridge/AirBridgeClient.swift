@@ -551,9 +551,24 @@ class AirBridgeClient: ObservableObject {
     private func handleWakeFromSleep() {
         queue.async { [weak self] in
             guard let self = self else { return }
-            guard case .relayActive = self.connectionState else { return }
-            print("[airbridge] Mac woke from sleep while relay is active, sending macWake via relay")
-            WebSocketServer.shared.sendWakeViaRelay()
+            print("[airbridge] Mac woke from sleep. Tearing down stale relay connection.")
+            
+            // If the user hasn't explicitly disabled AirBridge, trigger a fresh reconnect.
+            if !self.isManuallyDisconnected {
+                self.connectionGeneration += 1
+                self.pendingReconnectWorkItem?.cancel()
+                self.pendingReconnectWorkItem = nil
+                self.tearDown(reason: "System wake")
+                
+                DispatchQueue.main.async {
+                    self.connectionState = .connecting
+                }
+                
+                // Add a delay to allow the Wi-Fi adapter to authenticate with the new network
+                self.queue.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                    self?.connectInternal()
+                }
+            }
         }
     }
 
