@@ -130,6 +130,7 @@ struct QuickShareSettingsView: View {
                                 Toggle("", isOn: $appState.isFileAccessEnabled)
                                     .toggleStyle(.switch)
                                     .disabled(!AppState.shared.isPlus && AppState.shared.licenseCheck)
+                                    .disabled(appState.isRelayOnlyTransport)
                             }
 
                             if !AppState.shared.isPlus && AppState.shared.licenseCheck {
@@ -151,6 +152,13 @@ struct QuickShareSettingsView: View {
                             .onTapGesture {
                                 showingPlusPopover = false
                             }
+                    }
+
+                    if appState.isRelayOnlyTransport {
+                        Label(L("fileAccess.relayUnavailable"), systemImage: "exclamationmark.triangle")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
 
                     Text(Localizer.shared.text("settings.fileAccess.description"))

@@ -251,6 +251,7 @@ struct ConnectionPillPopover: View {
                             }
                         )
                         .focusable(false)
+                        .disabled(!appState.adbConnected && appState.isRelayOnlyTransport)
                     }
                     
                     GlassButtonView(
@@ -268,6 +269,13 @@ struct ConnectionPillPopover: View {
                     )
                     .focusable(false)
                     Spacer()
+                }
+
+                if !appState.adbConnected && appState.isRelayOnlyTransport {
+                    Label(L("adb.relayUnavailable"), systemImage: "exclamationmark.triangle")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
             } else {
             VStack(alignment: .leading, spacing: 12) {

@@ -72,10 +72,7 @@ struct SettingsFeaturesView: View {
                                 appState.device == nil ||
                                 appState.adbConnecting ||
                                 !AppState.shared.isPlus ||
-                                (
-                                    !WebSocketServer.shared.hasActiveLocalSession() &&
-                                    !(AirBridgeClient.shared.connectionState == .relayActive && appState.wiredAdbEnabled)
-                                )
+                                appState.isRelayOnlyTransport
                             )
                         }
 
@@ -92,6 +89,13 @@ struct SettingsFeaturesView: View {
                         }
                         .frame(width: 55)
 
+                    }
+
+                    if appState.isRelayOnlyTransport {
+                        Label(L("adb.relayUnavailable"), systemImage: "exclamationmark.triangle")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
 
                     if !AppState.shared.isPlus && AppState.shared.licenseCheck {

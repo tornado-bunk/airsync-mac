@@ -274,8 +274,9 @@ class AppState: ObservableObject {
                 validatePinnedApps()
                 loadRecentApps()
 
-                // Mount WebDAV volume
-                if newDevice.isRegularConnection && isPlus && isFileAccessEnabled {
+                // Mount WebDAV volume. Not available over the AirBridge relay: the mount
+                // points at the device LAN address, which the Mac cannot reach remotely.
+                if newDevice.isRegularConnection && isPlus && isFileAccessEnabled && !isRelayOnlyTransport {
                     WebDAVManager.shared.mount(ipAddress: newDevice.ipAddress, port: 9081, volumeName: newDevice.name)
                 }
             } else {
@@ -490,6 +491,13 @@ class AppState: ObservableObject {
         case .wifi: return true
         case .unknown: return isConnectedOverLocalNetwork
         }
+    }
+
+    // True when the AirBridge relay is the only usable transport. Features that need a
+    // direct network path to the device (ADB, WebDAV / file access) cannot work here,
+    // because the relay forwards AirSync traffic only and is not routable from the Mac.
+    var isRelayOnlyTransport: Bool {
+        AirBridgeClient.shared.connectionState == .relayActive && !WebSocketServer.shared.hasActiveLocalSession()
     }
 
     func updatePeerTransportHint(_ transport: String?) {
@@ -929,7 +937,8 @@ class AppState: ObservableObject {
             } else {
                 UserDefaults.standard.set(isFileAccessEnabled, forKey: "isFileAccessEnabled")
                 if isFileAccessEnabled {
-                    if let newDevice = device, newDevice.isRegularConnection {
+                    // Relay-only: nothing to mount, the device LAN address is unreachable.
+                    if let newDevice = device, newDevice.isRegularConnection, !isRelayOnlyTransport {
                         WebDAVManager.shared.mount(ipAddress: newDevice.ipAddress, port: 9081, volumeName: newDevice.name)
                     }
                 } else {

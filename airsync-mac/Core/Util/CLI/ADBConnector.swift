@@ -152,7 +152,20 @@ struct ADBConnector {
         connectionLock.unlock()
     }
 
+    /// ADB needs a direct network path to the device. The AirBridge relay only forwards
+    /// AirSync traffic and is not routable from the Mac, so every ADB entry point is
+    /// blocked when the relay is the only transport.
+    @discardableResult
+    static func blockedByRelay() -> Bool {
+        guard AppState.shared.isRelayOnlyTransport else { return false }
+        DispatchQueue.main.async {
+            AppState.shared.adbConnectionResult = L("adb.relayUnavailable")
+        }
+        return true
+    }
+
     static func connectToADB(ip: String, killServer: Bool = false) {
+        guard !blockedByRelay() else { return }
         connectionLock.lock()
         if isConnecting {
             connectionLock.unlock()
@@ -446,6 +459,7 @@ struct ADBConnector {
         desktop: Bool? = false,
         package: String? = nil
     ) {
+        guard !blockedByRelay() else { return }
         let bitrate = AppState.shared.scrcpyBitrate
         let resolution = AppState.shared.scrcpyResolution
         let wiredAdbEnabled = AppState.shared.wiredAdbEnabled
@@ -629,6 +643,10 @@ struct ADBConnector {
     }
 
     static func summonScreenshot(completion: @escaping (Data?) -> Void) {
+        guard !blockedByRelay() else {
+            completion(nil)
+            return
+        }
         let wiredAdbEnabled = AppState.shared.wiredAdbEnabled
         let fullAddress = "\(AppState.shared.adbConnectedIP):\(AppState.shared.adbPort)"
         let mappedSerial = AppState.shared.selectedWiredSerial ?? (AppState.shared.device?.deviceId).flatMap { AppState.shared.deviceAdbSerials[$0] }

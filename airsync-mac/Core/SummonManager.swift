@@ -15,6 +15,11 @@ class SummonManager {
     private init() {}
 
     func summonScreenshot() {
+        if AppState.shared.isRelayOnlyTransport {
+            presentRelayUnavailableAlert()
+            return
+        }
+
         guard AppState.shared.adbConnected else {
             presentNotConnectedAlert()
             return
@@ -85,6 +90,15 @@ class SummonManager {
             dest = URL(fileURLWithPath: path)
         }
         return dest
+    }
+
+    private func presentRelayUnavailableAlert() {
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "Summon Unavailable"
+        alert.informativeText = L("adb.relayUnavailable")
+        alert.addButton(withTitle: "OK")
+        presentAlertAsynchronously(alert)
     }
 
     private func presentNotConnectedAlert() {

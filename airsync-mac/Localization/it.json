@@ -103,6 +103,8 @@
   "settings.fileAccess.title": "Accesso ai file",
   "settings.fileAccess.enabled": "Abilita accesso ai file",
   "settings.fileAccess.description": "Monta automaticamente lo spazio di archiviazione del tuo dispositivo Android come unità locale nel Finder di macOS.",
+  "adb.relayUnavailable": "Non disponibile in relay. ADB richiede una connessione di rete locale.",
+  "fileAccess.relayUnavailable": "Non disponibile in relay. L'accesso ai file richiede una connessione di rete locale.",
   "settings.mirroring.scrcpy.title": "Duplicazione dello schermo con scrcpy",
   "settings.mirroring.scrcpy.description": "scrcpy è un'integrazione affidabile inclusa in AirSync",
   "settings.mirroring.native.title": "Duplicazione nativa (BETA)",

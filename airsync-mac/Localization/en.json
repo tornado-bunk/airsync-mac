@@ -103,6 +103,8 @@
   "settings.fileAccess.title": "File Access",
   "settings.fileAccess.enabled": "Enable file access",
   "settings.fileAccess.description": "Mount your Android device storage as a local drive in macOS Finder automatically.",
+  "adb.relayUnavailable": "Not available in relay mode. ADB needs a local network connection.",
+  "fileAccess.relayUnavailable": "Not available in relay mode. File access needs a local network connection.",
   "settings.mirroring.scrcpy.title": "scrcpy Mirror",
   "settings.mirroring.scrcpy.description": "scrcpy is a reliable integration built-in to AirSync",
   "settings.mirroring.native.title": "Native Mirror (BETA)",
