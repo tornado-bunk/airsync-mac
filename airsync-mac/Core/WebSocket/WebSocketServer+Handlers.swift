@@ -78,6 +78,8 @@ extension WebSocketServer {
             handleTransportCheckAck(message)
         case .transportNominate:
             handleTransportNominate(message)
+        case .userDisconnected:
+            handleUserDisconnected()
         case .volumeControl, .macVolume, .toggleAppNotif, .browseLs, .wakeUpRequest, .macMediaControlResponse, .macInfo, .callControl, .ping, .pong:
             // Outgoing or unexpected messages
             break
@@ -128,6 +130,8 @@ extension WebSocketServer {
             handleTransportCheckAck(message)
         case .transportNominate:
             handleTransportNominate(message)
+        case .userDisconnected:
+            handleUserDisconnected()
         case .device:
             // handled upstream in WebSocketServer.handleRelayedMessageInternal
             break
@@ -1016,6 +1020,12 @@ extension WebSocketServer {
            let action = dict["action"] as? String,
            let success = dict["success"] as? Bool {
             print("[websocket] Media control \(action) \(success ? "succeeded" : "failed")")
+        }
+    }
+
+    private func handleUserDisconnected() {
+        DispatchQueue.main.async {
+            AppState.shared.disconnectDevice(manual: true)
         }
     }
 

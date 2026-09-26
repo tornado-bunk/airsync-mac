@@ -129,10 +129,10 @@ extension WebSocketServer {
                             return
                         }
                         
-                        AppState.shared.disconnectDevice()
+                        AppState.shared.disconnectDevice(manual: false)
                         ADBConnector.disconnectADB()
                         AppState.shared.adbConnected = false
-                        
+
                         self.lock.lock()
                         self.isRestarting = false
                         self.lock.unlock()

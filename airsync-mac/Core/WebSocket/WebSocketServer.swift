@@ -424,7 +424,7 @@ class WebSocketServer: ObservableObject {
                 if wasPrimary {
                     self.publishLanTransportState(isActive: false, reason: "disconnected_primary_session")
                     DispatchQueue.main.async {
-                        AppState.shared.disconnectDevice()
+                        AppState.shared.disconnectDevice(manual: false)
                         ADBConnector.disconnectADB()
                         AppState.shared.adbConnected = false
                         // Guard against cascading restarts from multiple disconnected callbacks

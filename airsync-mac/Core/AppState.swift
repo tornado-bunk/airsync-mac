@@ -104,6 +104,8 @@ class AppState: ObservableObject {
 
         self.isClipboardSyncEnabled = UserDefaults.standard.bool(forKey: "isClipboardSyncEnabled")
         self.autoStartAtLogin = UserDefaults.standard.bool(forKey: "autoStartAtLogin")
+        self.keepRunningAfterQuit = UserDefaults.standard.bool(forKey: "keepRunningAfterQuit")
+        self.shortcutScopes = UserDefaults.standard.dictionary(forKey: "shortcutScopes") as? [String: String] ?? [:]
         self.windowOpacity = UserDefaults.standard.double(forKey: "windowOpacity")
         self.hideDockIcon = UserDefaults.standard.bool(forKey: "hideDockIcon")
         self.alwaysOpenWindow = UserDefaults.standard.bool(forKey: "alwaysOpenWindow")
@@ -118,6 +120,7 @@ class AppState: ObservableObject {
         let limit = UserDefaults.standard.integer(forKey: "sharedImagePopupsLimit")
         self.sharedImagePopupsLimit = limit == 0 ? 3 : limit
         self.popupSharedImagesOnLeft = UserDefaults.standard.bool(forKey: "popupSharedImagesOnLeft")
+        self.showSummonedFiles = UserDefaults.standard.object(forKey: "showSummonedFiles") == nil ? true : UserDefaults.standard.bool(forKey: "showSummonedFiles")
 
         let savedNotificationMode = UserDefaults.standard.string(forKey: "callNotificationMode") ?? CallNotificationMode.popup.rawValue
         self.callNotificationMode = CallNotificationMode(rawValue: savedNotificationMode) ?? .popup
@@ -265,6 +268,7 @@ class AppState: ObservableObject {
         didSet {
             // Store the last connected device when a new device connects
             if let newDevice = device {
+                UserDefaults.standard.isManuallyDisconnected = false
                 QuickConnectManager.shared.saveLastConnectedDevice(newDevice)
                 // Validate pinned apps when connecting to a device
                 validatePinnedApps()
@@ -314,7 +318,9 @@ class AppState: ObservableObject {
                 let workItem = DispatchWorkItem { [weak self] in
                     guard let self = self else { return }
                     let stillDisconnected = self.device == nil || self.device?.isBLE == true
-                    if stillDisconnected && self.isBLEEnabled && self.isBLEAutoConnectEnabled && !BLECentralManager.shared.isAuthenticated {
+                    if stillDisconnected && self.isBLEEnabled && self.isBLEAutoConnectEnabled
+                        && !BLECentralManager.shared.isAuthenticated
+                        && !UserDefaults.standard.isManuallyDisconnected {
                         print("[state] Regular connection stayed lost for 5s — resuming BLE scan to auto-connect nearby")
                         BLECentralManager.shared.isManuallyDisconnected = false
                         BLECentralManager.shared.startScanning()
@@ -385,9 +391,16 @@ class AppState: ObservableObject {
         activeCallDurationSec = 0
     }
     @Published var status: DeviceStatus? = nil {
-        didSet { syncMediaTimerToPlayState() }
+        didSet {
+            syncMediaTimerToPlayState()
+            updateWidgetData()
+        }
     }
-    @Published var myDevice: Device? = nil
+    @Published var myDevice: Device? = nil {
+        didSet {
+            updateWidgetData()
+        }
+    }
     @Published var port: UInt16 = Defaults.serverPort
     @Published var androidApps: [String: AndroidApp] = [:]
     @Published var notificationLaunchPreferences: [String: MacAppLaunchPreference] = [:]
@@ -704,6 +717,32 @@ class AppState: ObservableObject {
         }
     }
 
+    @Published var keepRunningAfterQuit: Bool {
+        didSet {
+            UserDefaults.standard.set(keepRunningAfterQuit, forKey: "keepRunningAfterQuit")
+        }
+    }
+
+    @Published var closeMainWindowTrigger = 0
+
+    @Published var shortcutScopes: [String: String] = [:] {
+        didSet {
+            UserDefaults.standard.set(shortcutScopes, forKey: "shortcutScopes")
+        }
+    }
+
+    func scope(for shortcutID: String) -> ShortcutScope {
+        if let raw = shortcutScopes[shortcutID], let scope = ShortcutScope(rawValue: raw) {
+            return scope
+        }
+        return AppShortcuts.all.first(where: { $0.id == shortcutID })?.defaultScope ?? .inApp
+    }
+
+    func setScope(_ scope: ShortcutScope, for definition: AppShortcutDefinition) {
+        shortcutScopes[definition.id] = scope.rawValue
+        ShortcutManager.applyScope(for: definition)
+    }
+
     @Published var connectionMode: AppConnectionMode {
         didSet {
             UserDefaults.standard.set(connectionMode.rawValue, forKey: "appConnectionMode")
@@ -839,6 +878,12 @@ class AppState: ObservableObject {
     @Published var popupSharedImagesOnLeft: Bool {
         didSet {
             UserDefaults.standard.set(popupSharedImagesOnLeft, forKey: "popupSharedImagesOnLeft")
+        }
+    }
+
+    @Published var showSummonedFiles: Bool {
+        didSet {
+            UserDefaults.standard.set(showSummonedFiles, forKey: "showSummonedFiles")
         }
     }
 
@@ -1266,10 +1311,12 @@ class AppState: ObservableObject {
         }
     }
 
-    func disconnectDevice() {
+    func disconnectDevice(manual: Bool = false) {
         DispatchQueue.main.async {
-            // Send request to remote device to disconnect
-            WebSocketServer.shared.sendDisconnectRequest()
+            if manual {
+                UserDefaults.standard.isManuallyDisconnected = true
+                WebSocketServer.shared.sendDisconnectRequest()
+            }
 
             // Then locally reset state
             self.device = nil
@@ -2063,5 +2110,18 @@ class AppState: ObservableObject {
         if let pos = status?.music?.position {
             syncMediaPosition(incoming: pos)
         }
+    }
+
+    private func updateWidgetData() {
+        let deviceName = device?.name ?? "Your Phone"
+        WidgetDataManager.shared.updateWidgetData(
+            deviceStatus: status,
+            deviceName: deviceName,
+            wallpaperBase64: currentDeviceWallpaperBase64,
+            isLocalNetwork: isConnectedOverLocalNetwork,
+            isBLEConnected: BLECentralManager.shared.isAuthenticated,
+            isADBConnected: adbConnected,
+            adbMode: adbConnectionMode?.rawValue ?? "wireless"
+        )
     }
 }
