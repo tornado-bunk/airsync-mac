@@ -1025,7 +1025,10 @@ extension WebSocketServer {
 
     private func handleUserDisconnected() {
         DispatchQueue.main.async {
-            AppState.shared.disconnectDevice(manual: true)
+            // Do not echo a disconnectRequest back: the peer already performed the manual
+            // disconnect. Over AirBridge the relay keeps the tunnel alive, so a mutual echo
+            // (userDisconnected <-> disconnectRequest) would loop indefinitely.
+            AppState.shared.disconnectDevice(manual: true, notifyPeer: false)
         }
     }
 

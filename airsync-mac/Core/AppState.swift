@@ -1311,11 +1311,13 @@ class AppState: ObservableObject {
         }
     }
 
-    func disconnectDevice(manual: Bool = false) {
+    func disconnectDevice(manual: Bool = false, notifyPeer: Bool = true) {
         DispatchQueue.main.async {
             if manual {
                 UserDefaults.standard.isManuallyDisconnected = true
-                WebSocketServer.shared.sendDisconnectRequest()
+                if notifyPeer {
+                    WebSocketServer.shared.sendDisconnectRequest()
+                }
             }
 
             // Then locally reset state
