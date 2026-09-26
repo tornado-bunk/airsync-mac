@@ -96,6 +96,14 @@ struct MyMacSettingsView: View {
                 .padding()
                 .glassBoxIfAvailable(radius: 18)
 
+                // AirBridge relay. This view used to be unreachable: the only place to
+                // configure the relay was the onboarding flow, so once past onboarding
+                // there was no way to check or change the server, pairing ID or secret.
+                SettingsHeaderView(title: "AirBridge Relay", icon: "antenna.radiowaves.left.and.right")
+                AirBridgeSettingsView()
+                    .padding()
+                    .glassBoxIfAvailable(radius: 18)
+
 
                 HStack {
                     Spacer()
