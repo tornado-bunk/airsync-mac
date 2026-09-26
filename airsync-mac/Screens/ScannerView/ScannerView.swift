@@ -211,7 +211,12 @@ func generateQRText(ip: String?, port: UInt16?, name: String?, key: String) -> S
 
         if !relay.isEmpty && !pairingId.isEmpty && !secret.isEmpty {
             qrText += "&relay=\(relay)&pairingId=\(pairingId)&secret=\(secret)"
+            print("[qr] AirBridge params INCLUDED (relay set, pairingId \(pairingId.count) chars, secret \(secret.count) chars)")
+        } else {
+            print("[qr] AirBridge params MISSING: relay=\(relay.isEmpty) pairingId=\(pairingId.isEmpty) secret=\(secret.isEmpty). Check the relay URL in AirBridge settings.")
         }
+    } else {
+        print("[qr] AirBridge params SKIPPED: enabled=\(AppState.shared.airBridgeEnabled) allowedByMode=\(AppState.shared.isRelayAllowedByMode) (mode=\(AppState.shared.connectionMode.rawValue)). Relay is only embedded in Dynamic mode.")
     }
 
     return qrText
