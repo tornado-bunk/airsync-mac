@@ -16,12 +16,14 @@ extension WebSocketServer {
     func handleMessage(_ message: Message, session: WebSocketSession) {
         let sessionId = ObjectIdentifier(session)
         
-        if message.type != .device && sessionId != primarySessionID {
+        if message.type != .device && message.type != .trustedNetworks && sessionId != primarySessionID {
             print("[websocket] Ignoring message of type \(message.type) from non-primary session")
             return
         }
 
         switch message.type {
+        case .trustedNetworks:
+            handleTrustedNetworkControl(message, session: session)
         case .device:
             handleDeviceHandshake(message, session: session)
         case .notification:
@@ -73,7 +75,7 @@ extension WebSocketServer {
         case .transportAnswer:
             handleTransportAnswer(message)
         case .transportCheck:
-            handleTransportCheck(message)
+            handleTransportCheck(message, fromRelay: false)
         case .transportCheckAck:
             handleTransportCheckAck(message)
         case .transportNominate:
@@ -90,6 +92,8 @@ extension WebSocketServer {
     /// Kept in this file so private handlers remain encapsulated.
     func handleRelayOnlyMessage(_ message: Message) {
         switch message.type {
+        case .trustedNetworks:
+            handleTrustedNetworkControl(message, session: nil)
         case .notification:
             handleNotification(message)
         case .status:
@@ -119,13 +123,13 @@ extension WebSocketServer {
         case .callControlResponse:
             handleCallControlResponse(message)
         case .peerTransport:
-            handlePeerTransportUpdate(message)
+            handlePeerTransportUpdate(message, fromRelay: true)
         case .transportOffer:
             handleTransportOffer(message)
         case .transportAnswer:
             handleTransportAnswer(message)
         case .transportCheck:
-            handleTransportCheck(message)
+            handleTransportCheck(message, fromRelay: true)
         case .transportCheckAck:
             handleTransportCheckAck(message)
         case .transportNominate:
@@ -152,23 +156,37 @@ extension WebSocketServer {
         self.lock.lock()
         
         let incomingTargetIp = (message.data.value as? [String: Any])?["targetIpAddress"] as? String ?? ""
-        let isIncomingLocal = ipIsPrivatePreferred(incomingTargetIp)
-        
+        var replacedSession: WebSocketSession?
+        guard let data = message.data.value as? [String: Any],
+              data["name"] is String, data["ipAddress"] is String, data["port"] is Int,
+              activeSessions.contains(where: { $0 === session }) else {
+            self.lock.unlock()
+            return
+        }
+
+        guard let networkID = sessionNetworkIDs[sessionId],
+              TrustedLANNetwork.shared.allows(networkID: networkID, localAddress: incomingTargetIp) else {
+            self.lock.unlock()
+            removeLocalSession(session, reason: "outside_pairing_network")
+            session.socket.close()
+            return
+        }
         if let oldPrimary = primarySessionID, oldPrimary != sessionId {
-            if isIncomingLocal {
-                print("[websocket] New local session taking over as primary. Closing old session.")
-                activeSessions.first(where: { ObjectIdentifier($0) == oldPrimary })?.writeBinary([])
-                self.primarySessionID = sessionId
-            } else {
-                print("[websocket] Ignoring non-local session takeover attempt (\(incomingTargetIp)) to maintain stability.")
-                self.lock.unlock()
-                return
-            }
-        } else {
-            self.primarySessionID = sessionId
+            replacedSession = activeSessions.first(where: { ObjectIdentifier($0) == oldPrimary })
+        }
+        self.primarySessionID = sessionId
+        if !incomingTargetIp.isEmpty {
+            sessionLocalAddresses[sessionId] = incomingTargetIp
         }
         self.lock.unlock()
-        
+        if let replacedSession {
+            removeLocalSession(replacedSession, reason: "replaced_by_new_lan_session")
+            replacedSession.socket.close()
+        }
+        publishLanTransportState(isActive: true, reason: "device_handshake")
+        AppState.shared.updatePeerTransportHint("wifi")
+        sendWakeViaRelay()
+
         if let dict = message.data.value as? [String: Any],
            let name = dict["name"] as? String,
            let ip = dict["ipAddress"] as? String,
@@ -824,10 +842,24 @@ extension WebSocketServer {
         }
     }
 
-    private func handlePeerTransportUpdate(_ message: Message) {
+    private func handlePeerTransportUpdate(_ message: Message, fromRelay: Bool = false) {
         guard let dict = message.data.value as? [String: Any] else { return }
         let transport = dict["transport"] as? String
-        AppState.shared.updatePeerTransportHint(transport)
+        if fromRelay {
+            lock.lock()
+            let active = activeSessions.first { ObjectIdentifier($0) == primarySessionID }
+            let currentNonce = active.flatMap { sessionProofNonces[ObjectIdentifier($0)] }
+            lock.unlock()
+            if let active {
+                // A delayed hint about an old socket must not tear down a fresh LAN session.
+                guard dict["lanNonce"] as? String == currentNonce else { return }
+                if transport == "relay" {
+                    removeLocalSession(active, reason: "peer_switched_to_relay")
+                    active.socket.close()
+                }
+            }
+        }
+        if transport != "wifi" || hasActiveLocalSession() { AppState.shared.updatePeerTransportHint(transport) }
     }
 
     private func isTransportMessageFresh(_ dict: [String: Any]) -> Bool {
@@ -919,11 +951,13 @@ extension WebSocketServer {
         _ = acceptIncomingTransportGeneration(generation, reason: "answer_rx")
     }
 
-    private func handleTransportCheck(_ message: Message) {
+    private func handleTransportCheck(_ message: Message, fromRelay: Bool) {
+        guard !fromRelay, hasActiveLocalSession() else { return }
         guard let dict = message.data.value as? [String: Any] else { return }
         let generation = dict["generation"] as? Int64 ?? Int64(dict["generation"] as? Int ?? 0)
         let token = dict["token"] as? String ?? ""
         if token.isEmpty || !isTransportGenerationActive(generation) { return }
+        markTransportGenerationValidated(generation, reason: "lan_check_rx")
         sendTransportCheckAck(generation: generation, token: token)
     }
 

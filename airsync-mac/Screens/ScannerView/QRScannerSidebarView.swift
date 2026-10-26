@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import Combine
 import QRCode
 import LocalAuthentication
 
@@ -166,6 +167,16 @@ struct QRScannerSidebarView: View {
         .onAppear {
             qrManager.generateQRAsync()
             WhatsNewTourManager.shared.evaluateActiveItem()
+        }
+        .onChange(of: appState.airBridgeEnabled) { _ in qrManager.generateQRAsync() }
+        .onChange(of: appState.connectionMode) { _ in qrManager.generateQRAsync() }
+        .onChange(of: appState.selectedNetworkAdapterName) { _ in qrManager.generateQRAsync() }
+        .onChange(of: qrManager.isUnlocked) { unlocked in
+            if unlocked { qrManager.generateQRAsync() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: AirBridgeClient.credentialsDidChange)
+            .receive(on: DispatchQueue.main)) { _ in
+            qrManager.generateQRAsync()
         }
         .onDisappear {
             qrManager.cleanUpTimer()

@@ -12,9 +12,12 @@ import Foundation
 import Combine
 import CryptoKit
 import AppKit
+import Network
+import OSLog
 
 class AirBridgeClient: ObservableObject {
     static let shared = AirBridgeClient()
+    static let credentialsDidChange = Foundation.Notification.Name("AirBridgeCredentialsDidChange")
 
     // MARK: - Published State
 
@@ -51,17 +54,28 @@ class AirBridgeClient: ObservableObject {
 
     var relayServerURL: String {
         get { UserDefaults.standard.string(forKey: "airBridgeRelayURL") ?? "" }
-        set { UserDefaults.standard.set(newValue, forKey: "airBridgeRelayURL") }
+        set {
+            UserDefaults.standard.set(newValue, forKey: "airBridgeRelayURL")
+            NotificationCenter.default.post(name: Self.credentialsDidChange, object: nil)
+        }
     }
 
     var pairingId: String {
         get { UserDefaults.standard.string(forKey: "airBridgePairingId") ?? "" }
-        set { UserDefaults.standard.set(newValue, forKey: "airBridgePairingId") }
+        set {
+            UserDefaults.standard.set(newValue, forKey: "airBridgePairingId")
+            NotificationCenter.default.post(name: Self.credentialsDidChange, object: nil)
+        }
     }
 
     var secret: String {
         get { loadSecretIfNeeded(); return _cachedSecret ?? "" }
-        set { _cachedSecret = newValue; _secretLoaded = true; KeychainStorage.set(newValue, for: Self.keychainKeySecret) }
+        set {
+            _cachedSecret = newValue
+            _secretLoaded = true
+            KeychainStorage.set(newValue, for: Self.keychainKeySecret)
+            NotificationCenter.default.post(name: Self.credentialsDidChange, object: nil)
+        }
     }
 
     /// Batch-update all three credentials.  Only the secret write touches Keychain
@@ -71,6 +85,7 @@ class AirBridgeClient: ObservableObject {
         _cachedSecret = secret
         _secretLoaded = true
         KeychainStorage.set(secret, for: Self.keychainKeySecret)
+        NotificationCenter.default.post(name: Self.credentialsDidChange, object: nil)
     }
 
     /// Ensures pairing credentials exist, generating them if empty.
@@ -98,7 +113,14 @@ class AirBridgeClient: ObservableObject {
     private let queue = DispatchQueue(label: "com.airsync.airbridge", qos: .userInitiated)
     private var connectionGeneration: Int = 0
     private var pendingReconnectWorkItem: DispatchWorkItem?
+    private var networkMonitor: NWPathMonitor?
+    private var lastNetworkRoute: NetworkRouteSnapshot?
+    private var handshakeTimeoutWorkItem: DispatchWorkItem?
+    private var relayPingTimeoutWorkItem: DispatchWorkItem?
+    private let logger = Logger(subsystem: "sameerasw.airsync-mac", category: "NetworkHandoff")
 
+    private var relayProtocol: RelayProtocol?
+    private var relayReady = false
     /// Tracks the nonce from the server's challenge message for HMAC computation
     private var pendingNonce: String?
 
@@ -134,6 +156,7 @@ class AirBridgeClient: ObservableObject {
         queue.async { [weak self] in
             guard let self = self else { return }
             self.isManuallyDisconnected = false
+            self.startNetworkMonitoring()
             guard !self.receiveLoopActive || self.webSocketTask == nil else { return }
             self.connectInternal()
         }
@@ -144,6 +167,9 @@ class AirBridgeClient: ObservableObject {
         queue.async { [weak self] in
             guard let self = self else { return }
             self.isManuallyDisconnected = true
+            self.networkMonitor?.cancel()
+            self.networkMonitor = nil
+            self.lastNetworkRoute = nil
             self.connectionGeneration += 1
             self.pendingReconnectWorkItem?.cancel()
             self.pendingReconnectWorkItem = nil
@@ -154,22 +180,24 @@ class AirBridgeClient: ObservableObject {
         }
     }
 
-    /// Sends an already-encrypted text message to the relay for forwarding to Android.
+    /// All application messages pass through authenticated framing and encryption here.
     func sendText(_ text: String) {
-        guard let task = webSocketTask else { return }
-        task.send(.string(text)) { error in
-            if let error = error {
-                print("[airbridge] Send text error: \(error.localizedDescription)")
-            }
+        queue.async { [weak self] in
+            guard let self, self.relayReady,
+                  let frame = self.relayProtocol?.wrap(text) else { return }
+            self.sendEncryptedFrame(frame)
         }
     }
 
-    /// Sends raw binary data to the relay for forwarding to Android.
-    func sendData(_ data: Data) {
-        guard let task = webSocketTask else { return }
-        task.send(.data(data)) { error in
-            if let error = error {
-                print("[airbridge] Send data error: \(error.localizedDescription)")
+    private func sendEncryptedFrame(_ frame: String) {
+        guard let key = WebSocketServer.shared.symmetricKey,
+              let encrypted = encryptMessage(frame, using: key),
+              let task = webSocketTask else { return }
+        let generation = connectionGeneration
+        task.send(.string(encrypted)) { [weak self] error in
+            guard error != nil, let self else { return }
+            self.queue.async {
+                self.scheduleReconnect(sourceGeneration: generation)
             }
         }
     }
@@ -192,10 +220,9 @@ class AirBridgeClient: ObservableObject {
         timeout: TimeInterval = 8,
         completion: @escaping (Result<Void, Error>) -> Void
     ) {
-        let normalized = normalizeRelayURL(url)
-        guard let wsURL = URL(string: normalized) else {
+        guard let normalized = normalizeRelayURL(url), let wsURL = URL(string: normalized) else {
             DispatchQueue.main.async {
-                completion(.failure(ConnectivityError.invalidURL(normalized)))
+                completion(.failure(ConnectivityError.invalidURL(url)))
             }
             return
         }
@@ -300,6 +327,7 @@ class AirBridgeClient: ObservableObject {
         _cachedSecret = newSecret
         _secretLoaded = true
         KeychainStorage.set(newSecret, for: Self.keychainKeySecret)
+        NotificationCenter.default.post(name: Self.credentialsDidChange, object: nil)
     }
 
     /// Returns a `airbridge://` URI containing all pairing config, suitable for QR encoding.
@@ -348,13 +376,14 @@ class AirBridgeClient: ObservableObject {
             return
         }
 
+        guard !isManuallyDisconnected, lastNetworkRoute?.isReachable != false else { return }
+
         // Ensure credentials exist before connecting
         ensureCredentialsExist()
 
         // Normalize URL: ensure it ends with /ws and has wss:// or ws:// prefix
-        let normalizedURL = normalizeRelayURL(relayServerURL)
-
-        guard let url = URL(string: normalizedURL) else {
+        guard let normalizedURL = normalizeRelayURL(relayServerURL),
+              let url = URL(string: normalizedURL) else {
             print("[airbridge] Invalid relay URL")
             DispatchQueue.main.async { self.connectionState = .failed(error: "Invalid URL") }
             return
@@ -364,13 +393,15 @@ class AirBridgeClient: ObservableObject {
         pendingReconnectWorkItem?.cancel()
         pendingReconnectWorkItem = nil
         pendingNonce = nil
+        relayProtocol = nil
+        relayReady = false
         connectionGeneration += 1
         let generation = connectionGeneration
         DispatchQueue.main.async { self.connectionState = .connecting }
 
         let config = URLSessionConfiguration.default
         config.waitsForConnectivity = true
-        config.timeoutIntervalForRequest = 30
+        config.timeoutIntervalForRequest = 15
 
         urlSession = URLSession(configuration: config)
         webSocketTask = urlSession?.webSocketTask(with: url)
@@ -379,6 +410,19 @@ class AirBridgeClient: ObservableObject {
         // Start receiving messages — the first message should be the challenge
         receiveLoopActive = true
         startReceiving(expectedGeneration: generation)
+        armHandshakeTimeout(generation: generation)
+        logger.info("Relay connecting, generation=\(generation)")
+    }
+
+    private func armHandshakeTimeout(generation: Int) {
+        handshakeTimeoutWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, generation == self.connectionGeneration else { return }
+            self.logger.notice("Relay handshake timed out")
+            self.scheduleReconnect(sourceGeneration: generation)
+        }
+        handshakeTimeoutWorkItem = work
+        queue.asyncAfter(deadline: .now() + 15, execute: work)
     }
 
     /// Handles the challenge message from the server and sends the HMAC register response.
@@ -418,7 +462,9 @@ class AirBridgeClient: ObservableObject {
                             DispatchQueue.main.async {
                                 self.connectionState = .waitingForPeer
                             }
-                            self.reconnectAttempt = 0
+                            self.handshakeTimeoutWorkItem?.cancel()
+                            self.handshakeTimeoutWorkItem = nil
+                            self.startPingLoop()
                         }
                     }
                 }
@@ -478,28 +524,11 @@ class AirBridgeClient: ObservableObject {
                 return
 
             case .relayStarted:
-                print("[airbridge] Relay tunnel established!")
-                queue.async { [weak self] in
-                    self?.pendingReconnectWorkItem?.cancel()
-                    self?.pendingReconnectWorkItem = nil
-                    self?.reconnectAttempt = 0
-                }
-                DispatchQueue.main.async {
-                    self.connectionState = .relayActive
-                    // Fresh relay session: the peer may have restarted and its
-                    // transport generation counter starts over, so stale higher
-                    // generations must not block the next negotiation round.
-                    WebSocketServer.shared.resetTransportNegotiationState()
-                    if !WebSocketServer.shared.hasActiveLocalSession() {
-                        AppState.shared.updatePeerTransportHint("relay")
-                    }
-                    self.startPingLoop()
-                }
-                // Relay can be active as a warm fallback while LAN is active; only advertise RELAY as primary when LAN is down.
-                if !WebSocketServer.shared.hasActiveLocalSession() {
-                    WebSocketServer.shared.sendPeerTransportStatus("relay")
-                    WebSocketServer.shared.sendTransportOffer(reason: "relay_started")
-                }
+                relayReady = false
+                relayProtocol = RelayProtocol(role: "mac")
+                DispatchQueue.main.async { self.connectionState = .waitingForPeer }
+                sendEncryptedFrame(relayProtocol!.hello)
+                armHandshakeTimeout(generation: expectedGeneration)
                 return
 
             case .macInfo:
@@ -520,9 +549,45 @@ class AirBridgeClient: ObservableObject {
             }
         }
 
-        // If it's not a control message, it's a relayed message from Android.
-        // Forward it to the local WebSocket handler as if it came from a LAN client.
-        WebSocketServer.shared.handleRelayedMessage(text)
+        guard let key = WebSocketServer.shared.symmetricKey,
+              let plaintext = decryptMessage(text, using: key),
+              let relayProtocol else { return }
+        let result = relayProtocol.receive(plaintext)
+        if let reply = result.reply {
+            sendEncryptedFrame(reply)
+            if !relayReady {
+                relayReady = true
+                activateRelay()
+            }
+        }
+        if let payload = result.payload, relayReady {
+            WebSocketServer.shared.handleRelayedMessage(payload)
+        }
+    }
+
+    private func activateRelay() {
+        logger.info("Relay tunnel established")
+        handshakeTimeoutWorkItem?.cancel()
+        handshakeTimeoutWorkItem = nil
+        pendingReconnectWorkItem?.cancel()
+        pendingReconnectWorkItem = nil
+        reconnectAttempt = 0
+        DispatchQueue.main.async {
+            self.connectionState = .relayActive
+            WebSocketServer.shared.sendTrustedNetworkControl(TrustedLANNetwork.shared.catalog())
+            // Fresh relay session: the peer may have restarted and its
+            // transport generation counter starts over, so stale higher
+            // generations must not block the next negotiation round.
+            WebSocketServer.shared.resetTransportNegotiationState()
+            if !WebSocketServer.shared.hasActiveLocalSession() {
+                AppState.shared.updatePeerTransportHint("relay")
+            }
+            self.startPingLoop()
+            if !WebSocketServer.shared.hasActiveLocalSession() {
+                WebSocketServer.shared.sendPeerTransportStatus("relay")
+            }
+            WebSocketServer.shared.sendWakeViaRelay()
+        }
     }
 
     private func handleBinaryMessage(_ data: Data) {
@@ -535,7 +600,9 @@ class AirBridgeClient: ObservableObject {
             guard let self = self else { return }
             self.pingTimer?.cancel()
             self.pingTimer = nil
+            guard self.webSocketTask != nil else { return }
             self.lastPongReceived = Date()
+            let generation = self.connectionGeneration
 
             let timer = DispatchSource.makeTimerSource(queue: self.queue)
             timer.schedule(deadline: .now() + self.pingInterval, repeating: self.pingInterval)
@@ -543,7 +610,7 @@ class AirBridgeClient: ObservableObject {
                 guard let self = self else { return }
 
                 let timeSinceLastPong = Date().timeIntervalSince(self.lastPongReceived)
-                if timeSinceLastPong > self.peerTimeout {
+                if self.relayReady && timeSinceLastPong > self.peerTimeout {
                     DispatchQueue.main.async {
                         if self.isPeerConnected {
                             print("[airbridge] Peer ping timeout (\(Int(timeSinceLastPong))s > \(Int(self.peerTimeout))s). Marking disconnected.")
@@ -552,14 +619,26 @@ class AirBridgeClient: ObservableObject {
                     }
                 }
 
-                let pingJson = "{\"type\":\"ping\"}"
-                // Encrypt ping
-                if let key = WebSocketServer.shared.symmetricKey,
-                   let encrypted = encryptMessage(pingJson, using: key) {
-                    self.sendText(encrypted)
-                } else {
-                    self.sendText(pingJson)
+                guard generation == self.connectionGeneration, let task = self.webSocketTask else { return }
+                // WebSocket pong checks the relay itself; application pong only checks the phone.
+                let timeout = DispatchWorkItem { [weak self] in
+                    guard let self else { return }
+                    self.logger.notice("Relay WebSocket pong timed out")
+                    self.scheduleReconnect(sourceGeneration: generation)
                 }
+                self.relayPingTimeoutWorkItem?.cancel()
+                self.relayPingTimeoutWorkItem = timeout
+                self.queue.asyncAfter(deadline: .now() + 6, execute: timeout)
+                task.sendPing { [weak self] error in
+                    guard let self else { return }
+                    self.queue.async {
+                        guard generation == self.connectionGeneration else { return }
+                        self.relayPingTimeoutWorkItem?.cancel()
+                        self.relayPingTimeoutWorkItem = nil
+                        if error != nil { self.scheduleReconnect(sourceGeneration: generation) }
+                    }
+                }
+                if self.relayReady { self.sendText("{\"type\":\"ping\"}") }
             }
             self.pingTimer = timer
             timer.resume()
@@ -576,29 +655,63 @@ class AirBridgeClient: ObservableObject {
         }
     }
 
-    /// Called when the Mac wakes from sleep; if the relay is active, notify Android so it can try LAN reconnect.
+    private func startNetworkMonitoring() {
+        guard networkMonitor == nil else { return }
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self, weak monitor] path in
+            guard let self, let monitor, self.networkMonitor === monitor else { return }
+            let route = NetworkRouteSnapshot(path: path)
+            guard route != self.lastNetworkRoute else { return }
+            let previous = self.lastNetworkRoute
+            self.lastNetworkRoute = route
+            if previous == nil && route.isReachable && self.webSocketTask != nil { return }
+            self.recoverAfterNetworkChange(reason: route.isReachable ? "Network route changed" : "Network unavailable")
+        }
+        networkMonitor = monitor
+        monitor.start(queue: queue)
+    }
+
+    /// Recovery never overrides a user's disconnect or the selected connection mode.
+    func recoverConnection(reason: String) {
+        queue.async { [weak self] in
+            guard let self, !self.isManuallyDisconnected, self.isRelayModePermitted(),
+                  UserDefaults.standard.bool(forKey: "airBridgeEnabled"),
+                  !UserDefaults.standard.isManuallyDisconnected else { return }
+            self.startNetworkMonitoring()
+            guard self.webSocketTask == nil, self.pendingReconnectWorkItem == nil else { return }
+            self.connectInternal()
+        }
+    }
+
+    private func recoverAfterNetworkChange(reason: String) {
+        guard networkMonitor != nil, !isManuallyDisconnected, isRelayModePermitted(),
+              !UserDefaults.standard.isManuallyDisconnected else { return }
+        connectionGeneration += 1
+        pendingReconnectWorkItem?.cancel()
+        pendingReconnectWorkItem = nil
+        tearDown(reason: reason)
+        reconnectAttempt = 0
+        logger.notice("\(reason, privacy: .public); network available=\(self.lastNetworkRoute?.isReachable ?? false)")
+        guard lastNetworkRoute?.isReachable != false else {
+            DispatchQueue.main.async { self.connectionState = .disconnected }
+            return
+        }
+        DispatchQueue.main.async { self.connectionState = .connecting }
+        let generation = connectionGeneration
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, !self.isManuallyDisconnected, generation == self.connectionGeneration else { return }
+            self.connectInternal()
+        }
+        pendingReconnectWorkItem = work
+        queue.asyncAfter(deadline: .now() + 1, execute: work)
+    }
+
     private func handleWakeFromSleep() {
         queue.async { [weak self] in
-            guard let self = self else { return }
-            print("[airbridge] Mac woke from sleep. Tearing down stale relay connection.")
-            
-            // If the user hasn't explicitly disabled AirBridge, trigger a fresh reconnect.
-            if !self.isManuallyDisconnected {
-                self.connectionGeneration += 1
-                self.pendingReconnectWorkItem?.cancel()
-                self.pendingReconnectWorkItem = nil
-                self.tearDown(reason: "System wake")
-                
-                DispatchQueue.main.async {
-                    self.connectionState = .connecting
-                }
-                
-                // Add a delay to allow the Wi-Fi adapter to authenticate with the new network
-                self.queue.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-                    self?.connectInternal()
-                }
-            }
+            guard let self else { return }
+            self.recoverAfterNetworkChange(reason: "System wake")
         }
+        DispatchQueue.main.async { WebSocketServer.shared.checkNetworkChange() }
     }
 
     // MARK: - Reconnect
@@ -609,7 +722,11 @@ class AirBridgeClient: ObservableObject {
             return
         }
 
+        // Invalidate all other callbacks from this failed socket before tearing it down.
+        connectionGeneration += 1
+        let retryGeneration = connectionGeneration
         tearDown(reason: "Preparing reconnect")
+        guard lastNetworkRoute?.isReachable != false else { return }
 
         let delay = min(pow(2.0, Double(reconnectAttempt)), maxReconnectDelay)
         reconnectAttempt += 1
@@ -621,7 +738,7 @@ class AirBridgeClient: ObservableObject {
         pendingReconnectWorkItem?.cancel()
         let work = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
-            guard !self.isManuallyDisconnected, sourceGeneration == self.connectionGeneration else { return }
+            guard !self.isManuallyDisconnected, retryGeneration == self.connectionGeneration else { return }
             self.connectInternal()
         }
         pendingReconnectWorkItem = work
@@ -629,6 +746,12 @@ class AirBridgeClient: ObservableObject {
     }
 
     private func tearDown(reason: String) {
+        handshakeTimeoutWorkItem?.cancel()
+        handshakeTimeoutWorkItem = nil
+        relayPingTimeoutWorkItem?.cancel()
+        relayPingTimeoutWorkItem = nil
+        relayProtocol = nil
+        relayReady = false
         receiveLoopActive = false
         pendingNonce = nil
         webSocketTask?.cancel(with: .goingAway, reason: reason.data(using: .utf8))
@@ -636,76 +759,15 @@ class AirBridgeClient: ObservableObject {
         urlSession?.invalidateAndCancel()
         urlSession = nil
         
-        // Clean up ping timer
-        queue.async { [weak self] in
-            guard let self = self else { return }
-            self.pingTimer?.cancel()
-            self.pingTimer = nil
-            DispatchQueue.main.async {
-                self.isPeerConnected = false
-            }
-        }
+        pingTimer?.cancel()
+        pingTimer = nil
+        DispatchQueue.main.async { self.isPeerConnected = false }
     }
 
     // MARK: - Helpers
 
-    private func normalizeRelayURL(_ raw: String) -> String {
-        var url = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        let host: String = {
-            // Use Foundation URL parsing to handle IPv6, ports, and paths correctly.
-            let parsingURLString: String
-            if url.hasPrefix("ws://") || url.hasPrefix("wss://") {
-                parsingURLString = url
-            } else {
-                // Prepend a dummy scheme for parsing purposes only.
-                parsingURLString = "ws://\(url)"
-            }
-            return URL(string: parsingURLString)?.host ?? ""
-        }()
-
-        let isPrivate = isPrivateHost(host)
-
-        // If user explicitly provided ws://, only allow it for private/localhost hosts.
-        // Upgrade to wss:// for public hosts to prevent cleartext transport over the internet.
-        if url.hasPrefix("ws://") && !url.hasPrefix("wss://") && !isPrivate {
-            print("[airbridge] SECURITY: Upgrading ws:// to wss:// for public host")
-            url = "wss://" + String(url.dropFirst(5))
-        }
-
-        // Add scheme if missing
-        if !url.hasPrefix("ws://") && !url.hasPrefix("wss://") {
-            if isPrivate {
-                url = "ws://\(url)"
-            } else {
-                url = "wss://\(url)"
-            }
-        }
-
-        // Add /ws path if missing
-        if !url.hasSuffix("/ws") {
-            if url.hasSuffix("/") {
-                url += "ws"
-            } else {
-                url += "/ws"
-            }
-        }
-
-        return url
-    }
-
-    /// Returns true if the host is a loopback or RFC 1918 private address.
-    private func isPrivateHost(_ host: String) -> Bool {
-        if host == "localhost" || host == "127.0.0.1" || host == "::1" { return true }
-        if host.hasPrefix("192.168.") || host.hasPrefix("10.") { return true }
-        // RFC 1918: only 172.16.0.0 – 172.31.255.255 (NOT all of 172.*)
-        if host.hasPrefix("172.") {
-            let parts = host.components(separatedBy: ".")
-            if parts.count >= 2, let second = Int(parts[1]), (16...31).contains(second) {
-                return true
-            }
-        }
-        return false
+    private func normalizeRelayURL(_ raw: String) -> String? {
+        RelayUrlPolicy.normalize(raw)
     }
 
     /// Generates a 32-char lowercase hex ID (128-bit entropy)

@@ -69,16 +69,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // Configure and retain main window when captured
     func configureMainWindowIfNeeded(_ window: NSWindow) {
-        if mainWindow == nil || mainWindow !== window {
-            mainWindow = window
-            window.delegate = self
-        }
-        window.isReleasedWhenClosed = false
+        mainWindow = window
+        window.delegate = self
         window.isReleasedWhenClosed = false
     }
 
-
-
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showAndActivateMainWindow()
+        return false
+    }
 
     // Public helper to bring the main window to the current Space and focus it
     func showAndActivateMainWindow() {

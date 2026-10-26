@@ -20,8 +20,11 @@ class QRConnectionManager: ObservableObject {
     @Published var showConfirmReset = false
     
     private var unlockTimer: Timer?
+    private var qrGeneration = UUID()
     
     func generateQRAsync() {
+        let generation = UUID()
+        qrGeneration = generation
         let ip = WebSocketServer.shared
             .getLocalIPAddress(
                 adapterName: AppState.shared.selectedNetworkAdapterName
@@ -52,6 +55,8 @@ class QRConnectionManager: ObservableObject {
         Task {
             if let cgImage = await QRCodeGenerator.generateQRCode(for: text, dimension: 600) {
                 DispatchQueue.main.async {
+                    // An older asynchronous render must not overwrite updated credentials.
+                    guard self.qrGeneration == generation else { return }
                     self.qrImage = cgImage
                 }
             }

@@ -53,6 +53,7 @@ enum MessageType: String, Codable {
     case transportAnswer
     case transportCheck
     case transportCheckAck
+    case trustedNetworks
     case transportNominate
 }
 

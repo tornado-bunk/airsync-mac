@@ -210,5 +210,22 @@
   "settings.connectionMode.network.info": "Uses local area network only. Bluetooth LE is disabled.",
   "settings.connectionMode.dynamic.info": "Uses Wi-Fi and Bluetooth LE with automatic fallback and switching. With AirBridge enabled, the relay server is used as a last-resort fallback over the internet.",
   "settings.connectionMode.nearby.info": "Uses Bluetooth LE only. Local network discovery is disabled.",
-  "settings.airbridge.blockedByMode": "AirBridge relay is inactive in this connection mode. Switch to Dynamic to use it."
+  "settings.airbridge.blockedByMode": "AirBridge relay is inactive in this connection mode. Switch to Dynamic to use it.",
+  "networks.title": "Trusted networks",
+  "networks.description": "Direct connections are allowed only on registered networks. Changes sync with your phone through Airbridge.",
+  "networks.empty": "No saved networks",
+  "networks.name": "Network name",
+  "networks.add": "Add network",
+  "networks.sameNetwork": "Keep your Mac and phone on the same local network during registration. Ethernet and Wi-Fi can be used together.",
+  "networks.save": "Save",
+  "networks.cancel": "Cancel",
+  "networks.rename": "Rename",
+  "networks.remove": "Remove",
+  "networks.removeQuestion": "Remove this trusted network?",
+  "networks.removeDescription": "Both devices will use Airbridge here until you register this network again.",
+  "networks.addShort": "Add",
+  "networks.current": "Current",
+  "networks.checking": "Verifying network…",
+  "networks.actions": "Network actions",
+  "settings.airbridge.credentials": "Credentials"
 }

@@ -105,6 +105,11 @@ struct MyMacSettingsView: View {
                     .glassBoxIfAvailable(radius: 18)
 
 
+                SettingsHeaderView(title: L("networks.title"), icon: "network")
+                TrustedNetworksSettingsView()
+                    .padding()
+                    .glassBoxIfAvailable(radius: 18)
+
                 HStack {
                     Spacer()
                     SaveAndRestartButton(

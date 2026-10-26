@@ -488,7 +488,7 @@ class AppState: ObservableObject {
     var isEffectivelyLocalTransport: Bool {
         switch peerTransportHint {
         case .relay: return false
-        case .wifi: return true
+        case .wifi: return isConnectedOverLocalNetwork
         case .unknown: return isConnectedOverLocalNetwork
         }
     }
@@ -1320,8 +1320,12 @@ class AppState: ObservableObject {
         }
     }
 
-    func disconnectDevice(manual: Bool = false, notifyPeer: Bool = true) {
+    func disconnectDevice(manual: Bool = false, notifyPeer: Bool = true, unlessReconnected: Bool = false) {
         DispatchQueue.main.async {
+            if unlessReconnected && (WebSocketServer.shared.hasActiveLocalSession() ||
+                AirBridgeClient.shared.connectionState == .relayActive || BLECentralManager.shared.isAuthenticated) {
+                return
+            }
             if manual {
                 UserDefaults.standard.isManuallyDisconnected = true
                 if notifyPeer {

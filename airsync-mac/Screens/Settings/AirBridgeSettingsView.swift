@@ -15,6 +15,7 @@ struct AirBridgeSettingsView: View {
     @State private var pairingId: String = ""
     @State private var secret: String = ""
     @State private var showSecret: Bool = false
+    @State private var credentialsExpanded = false
 
     var body: some View {
         VStack(spacing: 12) {
@@ -64,90 +65,98 @@ struct AirBridgeSettingsView: View {
 
                 Divider()
 
-                // Relay Server URL
-                HStack {
-                    Label("Relay Server", systemImage: "server.rack")
-                    Spacer()
-                    TextField("airbridge.yourdomain.com", text: $relayURL)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(maxWidth: 220)
-                        .onSubmit { saveRelayURL() }
+                DisclosureGroup(L("settings.airbridge.credentials"), isExpanded: $credentialsExpanded) {
+                    VStack(spacing: 12) {
+                        // Relay Server URL
+                        HStack {
+                            Label("Relay Server", systemImage: "server.rack")
+                            Spacer()
+                            TextField("airbridge.yourdomain.com", text: $relayURL)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(maxWidth: 220)
+                                .onSubmit { saveRelayURL() }
+                        }
+
+                        // Pairing ID (128-bit hex, show truncated with copy option)
+                        HStack {
+                            Label("Pairing ID", systemImage: "link")
+                            Spacer()
+                            Text(pairingId.prefix(12) + "...")
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                                .help(pairingId)
+
+                            Button {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(pairingId, forType: .string)
+                            } label: {
+                                Image(systemName: "doc.on.doc")
+                            }
+                            .buttonStyle(.borderless)
+                            .help("Copy Pairing ID")
+
+                            Button {
+                                regeneratePairingCredentials()
+                            } label: {
+                                Image(systemName: "arrow.clockwise")
+                            }
+                            .buttonStyle(.borderless)
+                            .help("Regenerate Pairing ID and Secret")
+                        }
+
+                        // Secret (passphrase)
+                        HStack {
+                            Label("Secret", systemImage: "key")
+                            Spacer()
+
+                            if showSecret {
+                                Text(secret)
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                    .textSelection(.enabled)
+                            } else {
+                                Text("••••-••••-••••-••••")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            Button {
+                                showSecret.toggle()
+                            } label: {
+                                Image(systemName: showSecret ? "eye.slash" : "eye")
+                            }
+                            .buttonStyle(.borderless)
+
+                            Button {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(secret, forType: .string)
+                            } label: {
+                                Image(systemName: "doc.on.doc")
+                            }
+                            .buttonStyle(.borderless)
+                            .help("Copy Secret")
+
+                        }
+
+                        Divider()
+
+                        // Save & Reconnect
+                        HStack {
+                            Spacer()
+                            Button {
+                                saveAndReconnect()
+                            } label: {
+                                Label("Save & Reconnect", systemImage: "arrow.triangle.2.circlepath")
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                        }
+                    }
+                    .padding(.top, 8)
                 }
-
-                // Pairing ID (128-bit hex, show truncated with copy option)
-                HStack {
-                    Label("Pairing ID", systemImage: "link")
-                    Spacer()
-                    Text(pairingId.prefix(12) + "...")
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                        .help(pairingId)
-
-                    Button {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(pairingId, forType: .string)
-                    } label: {
-                        Image(systemName: "doc.on.doc")
-                    }
-                    .buttonStyle(.borderless)
-                    .help("Copy Pairing ID")
-
-                    Button {
-                        regeneratePairingCredentials()
-                    } label: {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                    .buttonStyle(.borderless)
-                    .help("Regenerate Pairing ID and Secret")
-                }
-
-                // Secret (passphrase)
-                HStack {
-                    Label("Secret", systemImage: "key")
-                    Spacer()
-
-                    if showSecret {
-                        Text(secret)
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                    } else {
-                        Text("••••-••••-••••-••••")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                    }
-
-                    Button {
-                        showSecret.toggle()
-                    } label: {
-                        Image(systemName: showSecret ? "eye.slash" : "eye")
-                    }
-                    .buttonStyle(.borderless)
-
-                    Button {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(secret, forType: .string)
-                    } label: {
-                        Image(systemName: "doc.on.doc")
-                    }
-                    .buttonStyle(.borderless)
-                    .help("Copy Secret")
-
-                }
-
-                Divider()
-
-                // Save & Reconnect
-                HStack {
-                    Spacer()
-                    Button {
-                        saveAndReconnect()
-                    } label: {
-                        Label("Save & Reconnect", systemImage: "arrow.triangle.2.circlepath")
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
+                .onChange(of: credentialsExpanded) { _, expanded in
+                    if !expanded { showSecret = false }
                 }
             }
         }
@@ -172,6 +181,8 @@ struct AirBridgeSettingsView: View {
                 // Auto-connect immediately so the QR code is live
                 airBridge.connect()
             } else {
+                credentialsExpanded = false
+                showSecret = false
                 airBridge.disconnect()
             }
         }

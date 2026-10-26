@@ -21,6 +21,9 @@ class WebSocketServer: ObservableObject {
     internal var pingTimer: Timer?
     internal let pingInterval: TimeInterval = 4.5
     internal var lastActivity: [ObjectIdentifier: Date] = [:]
+    internal var sessionProofNonces: [ObjectIdentifier: String] = [:]
+    internal var sessionNetworkIDs: [ObjectIdentifier: String] = [:]
+    internal var sessionLocalAddresses: [ObjectIdentifier: String] = [:]
     internal let activityTimeout: TimeInterval = 20.0
     
     @Published var symmetricKey: SymmetricKey?
@@ -30,10 +33,14 @@ class WebSocketServer: ObservableObject {
     @Published var notifications: [Notification] = []
     @Published var deviceStatus: DeviceStatus?
 
+    internal var lastTrustedLANAllowed = false
+    internal var lastTrustedLANNetworkIDs = Set<String>()
     internal var lastKnownIP: String?
-    internal var isRestarting: Bool = false
     internal var networkMonitorTimer: Timer?
     internal var networkPathMonitor: NWPathMonitor?
+    internal var pendingNetworkChangeWorkItem: DispatchWorkItem?
+    internal var serverLifecycleGeneration = 0
+    internal var restartRequestGeneration = 0
     internal let networkMonitorQueue = DispatchQueue(label: "com.airsync.networkmonitor", qos: .utility)
     internal let networkCheckInterval: TimeInterval = 10.0
     internal let lock = NSRecursiveLock()
@@ -86,67 +93,45 @@ class WebSocketServer: ObservableObject {
         }
 
         let adapterName = AppState.shared.selectedNetworkAdapterName
-        let adapters = getAvailableNetworkAdapters()
-        
+        lock.lock()
+        serverLifecycleGeneration += 1
+        let generation = serverLifecycleGeneration
+        lock.unlock()
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self = self else { return }
-            
-            do {
-                guard port > 0 && port <= 65_535 else {
-                    let msg = "[websocket] Invalid port \(port)."
-                    DispatchQueue.main.async { AppState.shared.webSocketStatus = .failed(error: msg) }
-                    return
-                }
-
-                self.lock.lock()
-                self.stopAllServers()
-                
-                if let specificAdapter = adapterName {
-                    self.isListeningOnAll = false
-                    let server = HttpServer()
-                    self.setupWebSocket(for: server)
-                    try server.start(in_port_t(port))
-                    self.servers[specificAdapter] = server
-                    
-                    let ip = self.getLocalIPAddress(adapterName: specificAdapter)
-                    DispatchQueue.main.async {
-                        self.localPort = port
-                        self.localIPAddress = ip
-                        AppState.shared.webSocketStatus = .started(port: port, ip: ip)
-                        self.lastKnownIP = ip
-                    }
-                    print("[websocket] WebSocket server started at ws://\(ip ?? "unknown"):\(port)/socket on \(specificAdapter)")
-                } else {
-                    self.isListeningOnAll = true
-                    var startedAny = false
-                    for adapter in adapters {
-                        do {
-                            let server = HttpServer()
-                            self.setupWebSocket(for: server)
-                            if !startedAny {
-                                try server.start(in_port_t(port))
-                                self.servers["any"] = server
-                                startedAny = true
-                            }
-                        } catch {
-                            print("[websocket] Failed to start on \(adapter.name): \(error)")
-                        }
-                    }
-                    
-                    if startedAny {
-                        let ipList = self.getLocalIPAddress(adapterName: nil)
-                        DispatchQueue.main.async {
-                            self.localPort = port
-                            self.localIPAddress = "Multiple"
-                            AppState.shared.webSocketStatus = .started(port: port, ip: "Multiple")
-                            self.lastKnownIP = ipList
-                        }
-                        print("[websocket] WebSocket server started on all available adapters at port \(port)")
-                    }
-                }
+            guard let self else { return }
+            self.lock.lock()
+            guard generation == self.serverLifecycleGeneration else {
                 self.lock.unlock()
-
-                self.startNetworkMonitoring()
+                return
+            }
+            do {
+                guard port > 0 else { throw NSError(domain: "WebSocketServer", code: 1) }
+                self.stopAllServers()
+                let listener = HttpServer()
+                self.setupWebSocket(for: listener)
+                // A wildcard listener survives interface changes, including starting offline.
+                // Swifter.peername truncates IPv6 sockaddr; LAN identity currently uses IPv4.
+                try listener.start(in_port_t(port), forceIPv4: true)
+                self.servers["any"] = listener
+                self.isListeningOnAll = true
+                self.lock.unlock()
+                DispatchQueue.main.async {
+                    self.lock.lock()
+                    let isCurrent = generation == self.serverLifecycleGeneration
+                    self.lock.unlock()
+                    guard isCurrent else { return }
+                    let ip = self.getLocalIPAddress(adapterName: adapterName)
+                    self.localPort = port
+                    self.localIPAddress = ip
+                    self.lastKnownIP = ip
+                    self.lastKnownAdapters = self.getAvailableNetworkAdapters()
+                    AppState.shared.webSocketStatus = .started(port: port, ip: ip)
+                    TrustedLANNetwork.shared.refresh()
+                    self.lastTrustedLANAllowed = TrustedLANNetwork.shared.isAllowed
+                    self.startNetworkMonitoring()
+                    DiscoveryManager.shared.broadcastBurst()
+                    self.sendWakeViaRelay()
+                }
             } catch {
                 self.lock.unlock()
                 DispatchQueue.main.async { AppState.shared.webSocketStatus = .failed(error: "\(error)") }
@@ -161,14 +146,20 @@ class WebSocketServer: ObservableObject {
         servers.removeAll()
     }
 
-    func requestRestart(reason _reason: String, delay: TimeInterval = 0.35, port: UInt16? = nil) {
+    func requestRestart(reason: String, delay: TimeInterval = 0.35, port: UInt16? = nil) {
         lock.lock()
         let restartPort = port ?? localPort ?? Defaults.serverPort
         pendingRestartWorkItem?.cancel()
+        restartRequestGeneration += 1
+        let generation = restartRequestGeneration
         lock.unlock()
 
         let workItem = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
+            self.lock.lock()
+            let isCurrent = generation == self.restartRequestGeneration
+            self.lock.unlock()
+            guard isCurrent else { return }
             self.stop()
             self.start(port: restartPort)
         }
@@ -182,8 +173,16 @@ class WebSocketServer: ObservableObject {
 
     func stop() {
         lock.lock()
+        serverLifecycleGeneration += 1
+        restartRequestGeneration += 1
+        pendingRestartWorkItem?.cancel()
+        pendingRestartWorkItem = nil
         stopAllServers()
         activeSessions.removeAll()
+        lastActivity.removeAll()
+        sessionLocalAddresses.removeAll()
+        sessionNetworkIDs.removeAll()
+        sessionProofNonces.removeAll()
         primarySessionID = nil
         pendingLanDownWorkItem?.cancel()
         pendingLanDownWorkItem = nil
@@ -259,6 +258,7 @@ class WebSocketServer: ObservableObject {
     internal func beginTransportRound(_ generation: Int64, reason _reason: String) {
         guard generation > 0 else { return }
         lock.lock()
+        transportGenerationCounter = max(transportGenerationCounter, generation)
         activeTransportGeneration = generation
         activeTransportGenerationStartedAt = Date()
         validatedTransportGeneration = 0
@@ -304,7 +304,7 @@ class WebSocketServer: ObservableObject {
             beginTransportRound(generation, reason: "incoming_legacy_format_reset:\(reason)")
             return true
         }
-        if let startedAt, Date().timeIntervalSince(startedAt) > transportGenerationTTL, generation > current {
+        if generation > current || (startedAt.map { Date().timeIntervalSince($0) > transportGenerationTTL } ?? false) {
             beginTransportRound(generation, reason: "incoming_rollover:\(reason)")
             return true
         }
@@ -342,6 +342,7 @@ class WebSocketServer: ObservableObject {
                 guard let data = decryptedData, !data.isEmpty else { return }
 
                 self.lock.lock()
+                guard self.activeSessions.contains(where: { $0 === session }) else { self.lock.unlock(); return }
                 self.lastActivity[ObjectIdentifier(session)] = Date()
                 self.lock.unlock()
                 DispatchQueue.main.async {
@@ -382,55 +383,26 @@ class WebSocketServer: ObservableObject {
             connected: { [weak self] session in
                 guard let self = self else { return }
                 self.lock.lock()
+                guard self.activeSessions.count < 8 else {
+                    self.lock.unlock()
+                    session.socket.close()
+                    return
+                }
                 let sessionId = ObjectIdentifier(session)
                 self.lastActivity[sessionId] = Date()
                 self.activeSessions.append(session)
                 let sessionCount = self.activeSessions.count
-                let becamePrimary: Bool
                 self.lock.unlock()
-                print("[websocket] Session \(sessionId) connected.")
-                
-                let oldPrimaryActive = self.activeSessions.contains(where: { ObjectIdentifier($0) == self.primarySessionID })
-                if self.primarySessionID == nil || !oldPrimaryActive {
-                    self.primarySessionID = sessionId
-                    becamePrimary = true
-                } else {
-                    becamePrimary = false
-                }
-                
+
                 if sessionCount == 1 {
                     MacRemoteManager.shared.startVolumeMonitoring()
                     self.startPing()
                 }
 
-                if becamePrimary {
-                    self.publishLanTransportState(isActive: true, reason: "connected_primary_session")
-                }
             },
             disconnected: { [weak self] session in
                 guard let self = self else { return }
-                self.lock.lock()
-                self.activeSessions.removeAll(where: { $0 === session })
-                let sessionCount = self.activeSessions.count
-                let wasPrimary = (ObjectIdentifier(session) == self.primarySessionID)
-                if wasPrimary { self.primarySessionID = nil }
-                self.lock.unlock()
-                
-                if sessionCount == 0 {
-                    MacRemoteManager.shared.stopVolumeMonitoring()
-                    self.stopPing()
-                }
-                
-                if wasPrimary {
-                    self.publishLanTransportState(isActive: false, reason: "disconnected_primary_session")
-                    DispatchQueue.main.async {
-                        AppState.shared.disconnectDevice(manual: false)
-                        ADBConnector.disconnectADB()
-                        AppState.shared.adbConnected = false
-                        // Guard against cascading restarts from multiple disconnected callbacks
-                        self.restartServer()
-                    }
-                }
+                self.removeLocalSession(session, reason: "socket_disconnected")
             }
         )
     }
@@ -438,20 +410,10 @@ class WebSocketServer: ObservableObject {
     // MARK: - AirBridge Relay Integration
 
     /// Handles a text message received from the AirBridge relay (Android → Relay → Mac).
-    /// Decrypts and routes it through the same pipeline as local WebSocket messages.
+    /// Receives only authenticated, replay-checked plaintext from AirBridgeClient.
     func handleRelayedMessage(_ text: String) {
-        let decryptedText: String
-        if let key = self.symmetricKey {
-            if let dec = decryptMessage(text, using: key), !dec.isEmpty {
-                decryptedText = dec
-            } else {
-                print("[transport] SECURITY: RX via RELAY dropped — decryption failed.")
-                return
-            }
-        } else {
-            print("[transport] SECURITY: RX via RELAY dropped — no symmetric key available.")
-            return
-        }
+        // AirBridgeClient has already authenticated the session frame and decrypted it.
+        let decryptedText = text
 
         guard let data = decryptedText.data(using: .utf8) else {
             print("[transport] RX via RELAY dropped: UTF-8 conversion failed")
@@ -467,11 +429,7 @@ class WebSocketServer: ObservableObject {
             }
             if type == MessageType.ping.rawValue {
                 let pongPayload = #"{"type":"pong"}"#
-                if let key = symmetricKey, let encrypted = encryptMessage(pongPayload, using: key) {
-                    AirBridgeClient.shared.sendText(encrypted)
-                } else {
-                    AirBridgeClient.shared.sendText(pongPayload)
-                }
+                AirBridgeClient.shared.sendText(pongPayload)
                 return
             }
         }
@@ -496,7 +454,7 @@ class WebSocketServer: ObservableObject {
 
 
     /// Internal router for relayed messages.
-    /// Uses an existing local session when available, otherwise handles messages directly.
+    /// Always uses the relay permission set, including when a LAN session is also active.
     private func handleRelayedMessageInternal(_ message: Message) {
         // For the device handshake, we handle it entirely within the relay path
         if message.type == .device {
@@ -531,50 +489,17 @@ class WebSocketServer: ObservableObject {
             return
         }
 
-        // For all other messages, delegate to handleMessage only if a primary local session exists
         lock.lock()
-        let pId = primarySessionID
-        var session = pId != nil ? activeSessions.first(where: { ObjectIdentifier($0) == pId }) : nil
-        var sessionCount = activeSessions.count
-        var evictedPrimaryAsStale = false
-        if let s = session {
-            let sid = ObjectIdentifier(s)
-            let lastSeen = lastActivity[sid] ?? .distantPast
-            let stale = Date().timeIntervalSince(lastSeen) > activityTimeout
-            if stale {
-                // Immediate stale eviction: avoids routing relay traffic to a dead local socket.
-                activeSessions.removeAll(where: { ObjectIdentifier($0) == sid })
-                lastActivity.removeValue(forKey: sid)
-                if primarySessionID == sid {
-                    primarySessionID = nil
-                    evictedPrimaryAsStale = true
-                }
-                session = nil
-                sessionCount = activeSessions.count
-            }
+        let staleSession = activeSessions.first {
+            ObjectIdentifier($0) == primarySessionID && Date().timeIntervalSince(lastActivity[ObjectIdentifier($0)] ?? .distantPast) > activityTimeout
         }
         lock.unlock()
-
-        if evictedPrimaryAsStale {
-            publishLanTransportState(isActive: false, reason: "stale_primary_evicted_during_relay_rx")
+        if let staleSession {
+            removeLocalSession(staleSession, reason: "stale_session_during_relay_rx")
+            staleSession.socket.close()
         }
 
-        if sessionCount == 0 {
-            MacRemoteManager.shared.stopVolumeMonitoring()
-            stopPing()
-        }
-
-        if let session = session {
-            handleMessage(message, session: session)
-        } else {
-            // No local session — dispatch directly to AppState for non-session-critical messages
-            handleRelayedMessageWithoutSession(message)
-        }
-    }
-
-    /// Handles relay messages when no local WebSocket session exists.
-    /// This covers the cases where the Mac is connected ONLY via the relay.
-    private func handleRelayedMessageWithoutSession(_ message: Message) {
+        // Transport permissions follow the source of the frame, not LAN availability.
         handleRelayOnlyMessage(message)
     }
 
@@ -609,11 +534,7 @@ class WebSocketServer: ObservableObject {
 
         if let jsonData = try? JSONSerialization.data(withJSONObject: messageDict),
            let jsonString = String(data: jsonData, encoding: .utf8) {
-            if let key = symmetricKey, let encrypted = encryptMessage(jsonString, using: key) {
-                AirBridgeClient.shared.sendText(encrypted)
-            } else {
-                AirBridgeClient.shared.sendText(jsonString)
-            }
+            AirBridgeClient.shared.sendText(jsonString)
         }
     }
 
@@ -622,15 +543,18 @@ class WebSocketServer: ObservableObject {
         // Include current LAN endpoint hints so Android can reconnect without requiring a manual pair.
         // getLocalIPAddress(adapterName:nil) returns a comma-separated list in auto-mode.
         let adapter = AppState.shared.selectedNetworkAdapterName
-        let ipList = getLocalIPAddress(adapterName: adapter) ?? getLocalIPAddress(adapterName: nil) ?? ""
+        let lanAllowed = TrustedLANNetwork.shared.isAllowed
+        let ipList = lanAllowed ? TrustedLANNetwork.shared.allowedAddresses.joined(separator: ",") : ""
         let port = Int(localPort ?? Defaults.serverPort)
 
         let messageDict: [String: Any] = [
             "type": "macWake",
             "data": [
                 "ips": ipList,
+                "lanAllowed": lanAllowed,
+                "networkIDs": TrustedLANNetwork.shared.currentNetworkIDs,
                 "port": port,
-                "adapter": adapter as Any
+                "adapter": adapter ?? "auto"
             ]
         ]
 
@@ -640,14 +564,10 @@ class WebSocketServer: ObservableObject {
             return
         }
 
-        if let key = symmetricKey, let encrypted = encryptMessage(jsonString, using: key) {
-            AirBridgeClient.shared.sendText(encrypted)
-        } else {
-            AirBridgeClient.shared.sendText(jsonString)
-        }
+        AirBridgeClient.shared.sendText(jsonString)
 
         // Also emit a transport offer round so Android can immediately try LAN upgrade.
-        sendTransportOffer(reason: "mac_wake")
+        if lanAllowed { sendTransportOffer(reason: "mac_wake") }
     }
 
     // MARK: - Crypto Helpers
@@ -664,9 +584,11 @@ class WebSocketServer: ObservableObject {
                 symmetricKey = SymmetricKey(data: keyData)
             }
         }
+        TrustedLANNetwork.shared.refresh()
     }
 
     func resetSymmetricKey() {
+        UserDefaults.standard.hasPairedDeviceOnce = false
         UserDefaults.standard.removeObject(forKey: "encryptionKey")
         loadOrGenerateSymmetricKey()
     }
@@ -679,6 +601,8 @@ class WebSocketServer: ObservableObject {
     func setEncryptionKey(base64Key: String) {
         if let data = Data(base64Encoded: base64Key) {
             symmetricKey = SymmetricKey(data: data)
+            UserDefaults.standard.set(base64Key, forKey: "encryptionKey")
+            TrustedLANNetwork.shared.refresh()
         }
     }
 
@@ -688,35 +612,8 @@ class WebSocketServer: ObservableObject {
 
     // MARK: - Restart Helper
 
-    /// Single entry-point for all server restart logic.
-    /// Guarded by `isRestarting` to prevent cascading calls from multiple
-    /// simultaneous `disconnected` callbacks or stale-ping handlers.
-    /// Waits 1.5 s before restarting so any remaining callbacks finish first,
-    /// then re-broadcasts presence so Android can rediscover the Mac.
+    /// Explicit configuration changes can restart the listener; transport loss cannot.
     func restartServer() {
-        self.lock.lock()
-        guard !isRestarting else {
-            self.lock.unlock()
-            print("[websocket] Restart already in progress – skipping duplicate request")
-            return
-        }
-        isRestarting = true
-        let port = self.localPort ?? Defaults.serverPort
-        self.lock.unlock()
-
-        print("[websocket] Scheduling server restart in 1.5 s…")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-            self.stop()
-            self.start(port: port)
-
-            // Re-announce presence immediately after restart so Android can find us
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                DiscoveryManager.shared.broadcastBurst()
-                self.lock.lock()
-                self.isRestarting = false
-                self.lock.unlock()
-                print("[websocket] Server restart complete. Presence re-broadcast sent.")
-            }
-        }
+        requestRestart(reason: "Explicit restart", delay: 1.5)
     }
 }

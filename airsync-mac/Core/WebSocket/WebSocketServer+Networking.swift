@@ -6,6 +6,8 @@
 import Foundation
 import UniformTypeIdentifiers
 import Network
+import OSLog
+import Swifter
 #if canImport(MobileCoreServices)
 import MobileCoreServices
 #endif
@@ -65,7 +67,11 @@ extension WebSocketServer {
         if getifaddrs(&ifaddr) == 0, let firstAddr = ifaddr {
             for ptr in sequence(first: firstAddr, next: { $0.pointee.ifa_next }) {
                 let interface = ptr.pointee
-                let addrFamily = interface.ifa_addr.pointee.sa_family
+                guard let address = interface.ifa_addr,
+                      interface.ifa_flags & UInt32(IFF_UP) != 0,
+                      interface.ifa_flags & UInt32(IFF_RUNNING) != 0,
+                      interface.ifa_flags & UInt32(IFF_LOOPBACK) == 0 else { continue }
+                let addrFamily = address.pointee.sa_family
 
                 if addrFamily == UInt8(AF_INET),
                    let name = String(validatingUTF8: interface.ifa_name) {
@@ -88,7 +94,7 @@ extension WebSocketServer {
             }
             freeifaddrs(ifaddr)
         }
-        return adapters
+        return adapters.sorted { ($0.0, $0.1) < ($1.0, $1.1) }
     }
 
     func ipIsPrivatePreferred(_ ip: String) -> Bool {
@@ -106,77 +112,82 @@ extension WebSocketServer {
     // MARK: - Network Monitoring
 
     func startNetworkMonitoring() {
-        networkPathMonitor?.cancel()
+        stopNetworkMonitoring()
         let monitor = NWPathMonitor()
-        monitor.pathUpdateHandler = { [weak self] path in
-            guard path.status == .satisfied else { return }
-            self?.checkNetworkChange()
+        networkPathMonitor = monitor
+        monitor.pathUpdateHandler = { [weak self, weak monitor] _ in
+            DispatchQueue.main.async {
+                guard let self, let monitor, self.networkPathMonitor === monitor else { return }
+                self.pendingNetworkChangeWorkItem?.cancel()
+                let work = DispatchWorkItem { [weak self] in self?.checkNetworkChange() }
+                self.pendingNetworkChangeWorkItem = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
+            }
         }
         monitor.start(queue: networkMonitorQueue)
-        networkPathMonitor = monitor
+        // Address changes do not always produce a default-path change.
+        networkMonitorTimer = Timer.scheduledTimer(withTimeInterval: networkCheckInterval, repeats: true) { [weak self] _ in
+            self?.checkNetworkChange()
+        }
+        networkMonitorTimer?.tolerance = 1
     }
 
     func stopNetworkMonitoring() {
         networkPathMonitor?.cancel()
         networkPathMonitor = nil
-        DispatchQueue.main.async {
-            self.lock.lock()
-            self.networkMonitorTimer?.invalidate()
-            self.networkMonitorTimer = nil
-            self.lastKnownAdapters = []
-            self.lock.unlock()
-        }
+        pendingNetworkChangeWorkItem?.cancel()
+        pendingNetworkChangeWorkItem = nil
+        networkMonitorTimer?.invalidate()
+        networkMonitorTimer = nil
     }
 
-    /// Monitors network adapter state changes.
-    /// Triggers a WebSocket server restart if the active IP address changes to maintain connectivity.
+    /// Refresh discovery and relay hints without dropping the wildcard listener.
     func checkNetworkChange() {
+        lock.lock()
+        let listening = !servers.isEmpty
+        lock.unlock()
+        guard listening else { return }
+        TrustedLANNetwork.shared.refresh()
+        let lanAllowed = TrustedLANNetwork.shared.isAllowed
+        let networkIDs = Set(TrustedLANNetwork.shared.currentNetworkIDs)
+        let policyChanged = lanAllowed != lastTrustedLANAllowed || networkIDs != lastTrustedLANNetworkIDs
+        lastTrustedLANAllowed = lanAllowed
+        lastTrustedLANNetworkIDs = networkIDs
         let adapters = getAvailableNetworkAdapters()
+        let previousAddresses = Set(lastKnownAdapters.map { $0.address })
+        AppState.shared.revalidateNetworkAdapter()
         let chosenIP = getLocalIPAddress(adapterName: AppState.shared.selectedNetworkAdapterName)
+        let addresses = Set(adapters.map { $0.address })
+        guard addresses != previousAddresses || chosenIP != lastKnownIP || policyChanged else { return }
 
-        self.lock.lock()
-        let lastAddresses = lastKnownAdapters.map { $0.address }
-        let currentAddresses = adapters.map { $0.address }
-        let lastIP = lastKnownIP
-        self.lock.unlock()
-
-        if currentAddresses != lastAddresses {
-            self.lock.lock()
-            lastKnownAdapters = adapters
-            self.lock.unlock()
-
-            AppState.shared.revalidateNetworkAdapter()
-
-            for adapter in adapters {
-                let activeMark = (adapter.address == chosenIP) ? " [ACTIVE]" : ""
-                print("[websocket] (network) \(adapter.name) -> \(adapter.address)\(activeMark)")
-            }
-
-            if let lastIP = lastIP, lastIP != chosenIP {
-                print("[websocket] (network) IP changed from \(lastIP) to \(chosenIP ?? "N/A"), restarting WebSocket in 5 seconds")
-                
-                DispatchQueue.main.async {
-                    self.lock.lock()
-                    self.lastKnownIP = chosenIP
-                    self.lock.unlock()
-                    AppState.shared.shouldRefreshQR = true
-                }
-                
-                DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
-                    self.requestRestart(
-                        reason: "Network IP changed",
-                        delay: 0.2,
-                        port: Defaults.serverPort
-                    )
-                }
-            } else if lastIP == nil {
-                DispatchQueue.main.async {
-                    self.lock.lock()
-                    self.lastKnownIP = chosenIP
-                    self.lock.unlock()
-                }
-            }
+        // Preserve sessions if an unrelated adapter was added or removed.
+        let lostPreviousNetwork = !previousAddresses.isEmpty && previousAddresses.isDisjoint(with: addresses)
+        lastKnownAdapters = adapters
+        lastKnownIP = chosenIP
+        localIPAddress = chosenIP
+        if let port = localPort {
+            AppState.shared.webSocketStatus = .started(port: port, ip: chosenIP)
         }
+        AppState.shared.shouldRefreshQR = true
+        Logger(subsystem: "sameerasw.airsync-mac", category: "NetworkHandoff")
+            .notice("Local addresses changed; available=\(addresses.count), previous network lost=\(lostPreviousNetwork)")
+        lock.lock()
+        let sessions = activeSessions.filter {
+            if !lanAllowed { return true }
+            if let address = sessionLocalAddresses[ObjectIdentifier($0)] {
+                guard let networkID = sessionNetworkIDs[ObjectIdentifier($0)] else { return !addresses.contains(address) }
+                return !addresses.contains(address) || !TrustedLANNetwork.shared.allows(networkID: networkID, localAddress: address)
+            }
+            return lostPreviousNetwork
+        }
+        lock.unlock()
+        for session in sessions {
+            removeLocalSession(session, reason: "local_network_lost")
+            session.socket.close()
+        }
+        DiscoveryManager.shared.broadcastBurst()
+        AirBridgeClient.shared.recoverConnection(reason: "Local addresses changed")
+        sendWakeViaRelay()
     }
 
     // MARK: - Utils

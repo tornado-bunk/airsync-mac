@@ -5,6 +5,7 @@
 
 import Foundation
 import Swifter
+import OSLog
 
 extension WebSocketServer {
     
@@ -31,10 +32,7 @@ extension WebSocketServer {
         self.lock.unlock()
     }
     
-    /// Performs a session health check.
-    /// Identifies and forcibly disconnects stale sessions that have exceeded the activity timeout.
-    /// Only the *primary* session going stale triggers a full server restart. Non-primary zombie
-    /// sessions are force-closed silently to avoid cascading restarts.
+    /// Expire stale sessions without restarting a healthy listening socket.
     func performPing() {
         self.lock.lock()
         let sessions = activeSessions
@@ -74,90 +72,18 @@ extension WebSocketServer {
             }
             
             if isStale {
-                // If relay is currently active, avoid hard restart: stale local sessions
-                // can happen during transport switch (LAN <-> relay).
-                if AirBridgeClient.shared.connectionState == .relayActive {
-                    self.lock.lock()
-                    self.activeSessions.removeAll(where: { ObjectIdentifier($0) == sessionId })
-                    self.lastActivity.removeValue(forKey: sessionId)
-                    let evictedPrimary = (self.primarySessionID == sessionId)
-                    if self.primarySessionID == sessionId {
-                        self.primarySessionID = nil
-                    }
-                    let sessionCount = self.activeSessions.count
-                    self.lock.unlock()
-
-                    if evictedPrimary {
-                        self.publishLanTransportState(isActive: false, reason: "stale_primary_evicted_by_ping")
-                    }
-
-                    if sessionCount == 0 {
-                        MacRemoteManager.shared.stopVolumeMonitoring()
-                        self.stopPing()
-                    }
-                    continue
-                }
-
-                let isPrimary = (sessionId == primary)
-                if isPrimary {
-                    self.lock.lock()
-                    let alreadyRestarting = self.isRestarting
-                    self.lock.unlock()
-                    
-                    if alreadyRestarting {
-                        return
-                    }
-                    
-                    print("[websocket] Primary session \(sessionId) is stale (>\(Int(timeout))s). Disconnecting now.")
-                    
-                    self.lock.lock()
-                    self.isRestarting = true
-                    self.lock.unlock()
-                    
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.0) { [weak self] in
-                        guard let self = self else { return }
-                        
-                        self.lock.lock()
-                        let currentPrimary = self.primarySessionID
-                        self.lock.unlock()
-                        
-                        guard currentPrimary == sessionId, AppState.shared.device != nil else {
-                            self.lock.lock()
-                            self.isRestarting = false
-                            self.lock.unlock()
-                            print("[websocket] Grace period expired but primary session changed or device disconnected. Cancelling restart.")
-                            return
-                        }
-                        
-                        AppState.shared.disconnectDevice(manual: false)
-                        ADBConnector.disconnectADB()
-                        AppState.shared.adbConnected = false
-
-                        self.lock.lock()
-                        self.isRestarting = false
-                        self.lock.unlock()
-                        
-                        self.restartServer()
-                    }
-                    return // Let the restart handle everything; stop iterating
-                } else {
-                    // Non-primary zombie — just evict it without touching app state
-                    print("[websocket] Non-primary session \(sessionId) is stale. Force-closing silently.")
-                    self.lock.lock()
-                    self.activeSessions.removeAll { $0 === session }
-                    self.lastActivity.removeValue(forKey: sessionId)
-                    session.writeBinary([]) // Force-close
-                    self.lock.unlock()
-                    continue
-                }
+                removeLocalSession(session, reason: "heartbeat_timeout")
+                session.socket.close()
+                continue
             }
-            
+
             let pingJson = "{\"type\":\"ping\",\"data\":{}}"
             
             DispatchQueue.global(qos: .utility).async { [weak self] in
                 guard let self = self else { return }
                 self.lock.lock()
                 defer { self.lock.unlock() }
+                guard self.activeSessions.contains(where: { $0 === session }) else { return }
                 if let key = key, let encrypted = encryptMessage(pingJson, using: key) {
                     session.writeText(encrypted)
                 } else {
@@ -166,4 +92,45 @@ extension WebSocketServer {
             }
         }
     }
+
+    /// Shared by socket callbacks, heartbeat expiry and local-address loss.
+    func removeLocalSession(_ session: WebSocketSession, reason: String) {
+        lock.lock()
+        let id = ObjectIdentifier(session)
+        guard activeSessions.contains(where: { $0 === session }) else {
+            lock.unlock()
+            return
+        }
+        activeSessions.removeAll(where: { $0 === session })
+        lastActivity.removeValue(forKey: id)
+        sessionLocalAddresses.removeValue(forKey: id)
+        sessionNetworkIDs.removeValue(forKey: id)
+        sessionProofNonces.removeValue(forKey: id)
+        let wasPrimary = primarySessionID == id
+        if wasPrimary { primarySessionID = nil }
+        let empty = activeSessions.isEmpty
+        lock.unlock()
+        if empty {
+            MacRemoteManager.shared.stopVolumeMonitoring()
+            stopPing()
+        }
+        guard wasPrimary else { return }
+        Logger(subsystem: "sameerasw.airsync-mac", category: "NetworkHandoff")
+            .notice("LAN session ended: \(reason, privacy: .public)")
+        publishLanTransportState(isActive: false, reason: reason)
+        AirBridgeClient.shared.recoverConnection(reason: reason)
+        DispatchQueue.main.async {
+            guard !self.hasActiveLocalSession() else { return }
+            AppState.shared.isConnectionWeak = false
+            ADBConnector.disconnectADB()
+            AppState.shared.adbConnected = false
+            if AirBridgeClient.shared.connectionState == .relayActive {
+                AppState.shared.updatePeerTransportHint("relay")
+                self.sendWakeViaRelay()
+            } else if !BLECentralManager.shared.isAuthenticated {
+                AppState.shared.disconnectDevice(manual: false, unlessReconnected: true)
+            }
+        }
+    }
+
 }

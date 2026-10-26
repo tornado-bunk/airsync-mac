@@ -39,11 +39,10 @@ extension WebSocketServer {
                 session.writeText(message)
             }
         } else if AirBridgeClient.shared.connectionState == .relayActive {
-            if let key = key, let encrypted = encryptData(data, using: key) {
-                AirBridgeClient.shared.sendText(encrypted)
-            } else if let message = String(data: data, encoding: .utf8) {
-                AirBridgeClient.shared.sendText(message)
-            }
+            guard let message = String(data: data, encoding: .utf8) else { return false }
+            AirBridgeClient.shared.sendText(message)
+        } else {
+            return false
         }
         return true
     }
@@ -163,9 +162,10 @@ extension WebSocketServer {
     }
 
     func sendTransportOffer(reason: String, generation: Int64? = nil) {
+        guard TrustedLANNetwork.shared.isAllowed else { return }
         let generationValue = generation ?? nextTransportGeneration()
         beginTransportRound(generationValue, reason: "send_offer:\(reason)")
-        let ips = getLocalIPAddress(adapterName: AppState.shared.selectedNetworkAdapterName) ?? ""
+        let ips = TrustedLANNetwork.shared.allowedAddresses.joined(separator: ",")
         let port = Int(localPort ?? Defaults.serverPort)
         let candidates: [[String: Any]] = ips
             .split(separator: ",")
@@ -184,10 +184,11 @@ extension WebSocketServer {
     }
 
     func sendTransportAnswer(generation: Int64, reason: String) {
+        guard TrustedLANNetwork.shared.isAllowed else { return }
         guard isTransportGenerationActive(generation) else {
             return
         }
-        let ips = getLocalIPAddress(adapterName: AppState.shared.selectedNetworkAdapterName) ?? ""
+        let ips = TrustedLANNetwork.shared.allowedAddresses.joined(separator: ",")
         let port = Int(localPort ?? Defaults.serverPort)
         let candidates: [[String: Any]] = ips
             .split(separator: ",")

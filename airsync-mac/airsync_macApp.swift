@@ -377,7 +377,7 @@ extension View {
     func applyMainWindowSetup(appDelegate: AppDelegate, appState: AppState) -> some View {
         self.background(WindowAccessor(callback: { window in
             window.identifier = NSUserInterfaceItemIdentifier("main")
-            appDelegate.mainWindow = window
+            appDelegate.configureMainWindowIfNeeded(window)
             // Make window transparent during onboarding
             if appState.isOnboardingActive {
                 window.alphaValue = 0.0
